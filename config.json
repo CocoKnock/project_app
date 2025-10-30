@@ -2,6 +2,17 @@
     "AudioSettings": {
         "SampleRate": 44100,
         "Channels": 1,
-        "Format": "WAV"
+        "Duration": 3,
+        "Format": ".wav"
+    },
+    "AudioFilePaths": {
+        "AudioSavePath": "Data/Audio",
+        "FileNamePrefix": "audio_",
+        "AudioFormat": ".wav"
+    },
+    "ImageFilePaths": {
+        "ImageSavePath": "Data/Images",
+        "FileNamePrefix": "image_",
+        "ImageFormat": ".jpg"
     }
 }

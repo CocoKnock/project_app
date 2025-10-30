@@ -1,5 +1,3 @@
-# utils/LoadConfig.py
-
 import json
 import os
 
