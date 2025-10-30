@@ -1,0 +1,7 @@
+customtkinter
+opencv-python
+numpy
+pandas
+joblib
+Pillow
+scikit-learn
