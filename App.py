@@ -800,7 +800,7 @@ pages["data_detection4"] = load_data_detection_page_4
 def load_data_detection_page_5():
     global selected_file, hsv_class
 
-    frame = ctk.CTkFrame(main_container)
+    frame = ctk.CTkFrame(main_container, fg_color="#E8E5DA")
     frame.grid(row=0, column=0, sticky="nsew")
     main_container.grid_rowconfigure(0, weight=1)
     main_container.grid_columnconfigure(0, weight=1)
@@ -813,14 +813,14 @@ def load_data_detection_page_5():
     # ==========================
     # LEFT SIDE: IMAGE PREVIEW
     # ==========================
-    image_frame = ctk.CTkFrame(frame)
+    image_frame = ctk.CTkFrame(frame, fg_color="#E8E5DA")
     image_frame.grid(row=0, column=0, sticky="nsew", padx=(30, 15), pady=30)
     image_frame.grid_rowconfigure(0, weight=1)
     image_frame.grid_columnconfigure(0, weight=1)
 
     if selected_file and os.path.exists(selected_file):
         try:
-            canvas_card = ctk.CTkFrame(image_frame, corner_radius=15)
+            canvas_card = ctk.CTkFrame(image_frame, corner_radius=15, fg_color="#FFFFFF")
             canvas_card.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
             canvas_card.grid_rowconfigure(0, weight=1)
             canvas_card.grid_columnconfigure(0, weight=1)
@@ -855,7 +855,7 @@ def load_data_detection_page_5():
     # ==========================
     # RIGHT SIDE: SUMMARY INFO
     # ==========================
-    info_frame = ctk.CTkFrame(frame)
+    info_frame = ctk.CTkFrame(frame, fg_color="#E8E5DA")
     info_frame.grid(row=0, column=1, sticky="nsew", padx=(15, 30), pady=30)
     for i in range(8):
         info_frame.grid_rowconfigure(i, weight=1)
