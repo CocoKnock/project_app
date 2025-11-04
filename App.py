@@ -32,9 +32,10 @@ except Exception as e:
     model = None
 
 try:
-    from picamera2 import PiCamera2
+    from picamera2 import Picamera2
     USE_PICAMERA2 = True
-except Exception:
+except Exception as e:
+    print("PiCamera2 not available:", e)
     USE_PICAMERA2 = False
 
 
