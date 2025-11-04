@@ -32,7 +32,7 @@ except Exception as e:
     model = None
 
 try:
-    from picamera2 import Picamera2, Transform
+    from picamera2 import Picamera2
     USE_PICAMERA2 = True
 except Exception as e:
     print("PiCamera2 not available:", e)
@@ -330,8 +330,7 @@ def load_data_collection_page_1():
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
         picam = Picamera2()
-        preview_config = picam.create_preview_configuration(main={"size": (640, 480)}, 
-                                                            Transform=Transform(rotation=180))
+        preview_config = picam.create_preview_configuration(main={"size": (640, 480)})
         picam.configure(preview_config)
         picam.start()
 
@@ -340,6 +339,7 @@ def load_data_collection_page_1():
             global camera_after
             try:
                 frame_arr = picam.capture_array()
+                frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
                 frame_rgb = cv2.cvtColor(frame_arr, cv2.COLOR_BGR2RGB)
                 w = cam_canvas.winfo_width() or 560
                 h = cam_canvas.winfo_height() or 280
@@ -357,6 +357,7 @@ def load_data_collection_page_1():
             global selected_file
             try:
                 frame_arr = picam.capture_array()
+                frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
                 timestamp = time.strftime('%Y%m%d-%H%M%S')
                 tmp_name = f"tmp_capture_{timestamp}.jpg"
                 tmp_path = folder_path1 / tmp_name
@@ -588,8 +589,7 @@ def load_data_detection_page_1():
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
         picam = Picamera2()
-        preview_config = picam.create_preview_configuration(main={"size": (640, 480)}, 
-                                                            Transform=Transform(rotation=180))
+        preview_config = picam.create_preview_configuration(main={"size": (640, 480)})
         picam.configure(preview_config)
         picam.start()
 
@@ -597,6 +597,7 @@ def load_data_detection_page_1():
             global camera_after
             try:
                 frame_arr = picam.capture_array()
+                frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
                 frame_rgb = cv2.cvtColor(frame_arr, cv2.COLOR_BGR2RGB)
                 w = cam_canvas.winfo_width() or 560
                 h = cam_canvas.winfo_height() or 280
@@ -614,6 +615,7 @@ def load_data_detection_page_1():
             global selected_file
             try:
                 frame_arr = picam.capture_array()
+                frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
                 timestamp = time.strftime('%Y%m%d-%H%M%S')
                 tmp_name = f"tmp_capture_{timestamp}.jpg"
                 tmp_path = folder_path1 / tmp_name
