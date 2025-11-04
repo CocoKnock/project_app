@@ -341,7 +341,7 @@ def load_data_collection_page_1():
             try:
                 frame_arr = picam.capture_array()
                 frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
-                frame_rgb = cv2.cvtColor(frame_arr, cv2.COLOR_BGR2RGB)
+                frame_rgb = frame_arr
                 w = cam_canvas.winfo_width() or 560
                 h = cam_canvas.winfo_height() or 280
                 frame_resized = cv2.resize(frame_rgb, (w, h))
@@ -599,7 +599,7 @@ def load_data_detection_page_1():
             try:
                 frame_arr = picam.capture_array()
                 frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
-                frame_rgb = cv2.cvtColor(frame_arr, cv2.COLOR_BGR2RGB)
+                frame_rgb = frame_arr
                 w = cam_canvas.winfo_width() or 560
                 h = cam_canvas.winfo_height() or 280
                 frame_resized = cv2.resize(frame_rgb, (w, h))
