@@ -142,6 +142,7 @@ def stop_camera():
         if picam is not None:
             try:
                 picam.stop()
+                picam.close()
             except Exception:
                 pass
             picam = None
