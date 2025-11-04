@@ -329,11 +329,15 @@ def load_data_collection_page_1():
     # --- camera setup
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
+        from libcamera import Transform
         picam = Picamera2()
-        picam.set_controls({"Rotation": 180})
-        preview_config = picam.create_preview_configuration(main={"size": (640, 480)})
+        preview_config = picam.create_preview_configuration(
+        main={"size": (640, 480)},
+        transform=libcamera.Transform(hflip=True, vflip=True)
+        )
         picam.configure(preview_config)
         picam.start()
+
 
         def update_frame_picam():
             global camera_after
@@ -586,9 +590,12 @@ def load_data_detection_page_1():
 
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
+        from libcamera import Transform
         picam = Picamera2()
-        picam.set_controls({"Rotation": 180})
-        preview_config = picam.create_preview_configuration(main={"size": (640, 480)})
+        preview_config = picam.create_preview_configuration(
+        main={"size": (640, 480)},
+        transform=libcamera.Transform(hflip=True, vflip=True)
+        )
         picam.configure(preview_config)
         picam.start()
 
