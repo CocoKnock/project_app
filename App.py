@@ -330,6 +330,7 @@ def load_data_collection_page_1():
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
         picam = Picamera2()
+        picam.rotation = 180
         preview_config = picam.create_preview_configuration(main={"size": (640, 480)})
         picam.configure(preview_config)
         picam.start()
@@ -587,6 +588,7 @@ def load_data_detection_page_1():
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
         picam = Picamera2()
+        picam.rotation = 180
         preview_config = picam.create_preview_configuration(main={"size": (640, 480)})
         picam.configure(preview_config)
         picam.start()
