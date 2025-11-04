@@ -1,5 +1,4 @@
 from pathlib import Path
-from libcamera import Transform
 import customtkinter as ctk
 from tkinter import Canvas, messagebox
 import cv2
@@ -331,10 +330,6 @@ def load_data_collection_page_1():
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
         picam = Picamera2()
-        preview_config = picam.create_preview_configuration(
-        main={"size": (640, 480)},
-        transform=libcamera.Transform(hflip=True, vflip=True)
-        )
         picam.configure(preview_config)
         picam.start()
 
@@ -591,10 +586,6 @@ def load_data_detection_page_1():
     if USE_PICAMERA2:
         print("Using PiCamera2 (Raspberry Pi Camera)")
         picam = Picamera2()
-        preview_config = picam.create_preview_configuration(
-        main={"size": (640, 480)},
-        transform=libcamera.Transform(hflip=True, vflip=True)
-        )
         picam.configure(preview_config)
         picam.start()
 
