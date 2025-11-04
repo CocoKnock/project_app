@@ -426,7 +426,7 @@ def load_data_collection_page_1():
     capture_btn = make_button(controls, "Feature Extraction", capture_and_next)
     capture_btn.grid(row=0, column=0, padx=6, ipadx=20, ipady=8, sticky="e")
 
-    back_btn = make_button(controls, "Main Menu", lambda: switch_page("main"))
+    back_btn = make_button(controls, "Main Menu", lambda: [stop_camera(), switch_page("main")])
     back_btn.grid(row=0, column=1, padx=6, ipadx=8, ipady=8, sticky="w")
 
     return frame
@@ -680,7 +680,7 @@ def load_data_detection_page_1():
     capture_btn = make_button(controls, "Feature Extraction", capture_and_next)
     capture_btn.grid(row=0, column=0, padx=6, ipadx=20, ipady=8, sticky="e")
 
-    back_btn = make_button(controls, "Main Menu", lambda: switch_page("main"))
+    back_btn = make_button(controls, "Main Menu", lambda: [stop_camera(), switch_page("main")])
     back_btn.grid(row=0, column=1, padx=6, ipadx=8, ipady=8, sticky="w")
 
     return frame
