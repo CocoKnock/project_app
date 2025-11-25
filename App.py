@@ -11,6 +11,7 @@ import platform
 import threading
 from joblib import load
 from PIL import Image, ImageTk
+from scipy.stats import skew, kurtosis
 
 # Globals
 video_capture = None
@@ -155,20 +156,50 @@ def camera_features(image_path):
     img = cv2.imread(image_path)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
+    # Mean
     h_mean = np.mean(hsv[:, :, 0])
     s_mean = np.mean(hsv[:, :, 1])
     v_mean = np.mean(hsv[:, :, 2])
 
-    return [h_mean, s_mean, v_mean]
+    # Std
+    h_std = np.std(hsv[:, :, 0])
+    s_std = np.std(hsv[:, :, 1])
+    v_std = np.std(hsv[:, :, 2])
+
+    # Skewness
+    h_skew = skew(hsv[:, :, 0].reshape(-1))
+    s_skew = skew(hsv[:, :, 1].reshape(-1))
+    v_skew = skew(hsv[:, :, 2].reshape(-1))
+
+    # Kurtosis
+    h_kurt = kurtosis(hsv[:, :, 0].reshape(-1))
+    s_kurt = kurtosis(hsv[:, :, 1].reshape(-1))
+    v_kurt = kurtosis(hsv[:, :, 2].reshape(-1))
+
+    # GLCM Texture
+    v_uin8 = hsv[:, :, 2].astype(np.uint8)
+    glcm = graycomatrix(v_uin8, distances=[1], angles=[0], levels=256, symmetric=True, normed=True) 
+
+    glcm_contrast = graycoprops(glcm, 'contrast')[0, 0]
+    glcm_dissimilarity = graycoprops(glcm, 'dissimilarity')[0, 0]
+    glcm_homogeneity = graycoprops(glcm, 'homogeneity')[0, 0]
+    glcm_energy = graycoprops(glcm, 'energy')[0, 0]
+    glcm_correlation = graycoprops(glcm, 'correlation')[0, 0]
+    glcm_asm = graycoprops(glcm, 'ASM')[0, 0]
+
+
+    return [
+        h_mean, s_mean, v_mean,
+        h_std, s_std, v_std,
+        h_skew, s_skew, v_skew,
+        h_kurt, s_kurt, v_kurt,
+        glcm_contrast, glcm_dissimilarity,
+        glcm_homogeneity, glcm_energy,
+        glcm_correlation, glcm_asm
+    ]
 
 
 def camera_prepro(image_path, threaded=False, on_complete=None):
-    """
-    Preprocesses an image and classifies it.
-    - If threaded=True, runs asynchronously and calls on_complete(processed_file, hsv_class)
-    - If threaded=False, runs synchronously and returns (processed_file, hsv_class)
-    """
-
     def process_task():
         global hsv_class
         processed_file = None
@@ -184,18 +215,34 @@ def camera_prepro(image_path, threaded=False, on_complete=None):
             upper = np.array([90, 255, 255])
             mask = cv2.inRange(hsv, lower, upper)
 
+            # ---------- ADD: Blob filtering (largest connected component) ----------
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            if num_labels > 1:
+                largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+                mask = np.uint8(labels == largest_label) * 255
+
+            # ---------- ADD: Hole filling ----------
+            mask_filled = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+            mask = mask_filled
+
+            # ---------- (KEEP) Morphological operations ----------
             kernel = np.ones((3, 3), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
+            # Apply mask to color image
             masked_img = cv2.bitwise_and(img, img, mask=mask)
+
+            # ---------- (KEEP) Final step: Resize ----------
             resized_img = cv2.resize(masked_img, (224, 224))
 
             processed_file = os.path.splitext(image_path)[0] + "_processed.jpg"
             cv2.imwrite(processed_file, resized_img)
 
+            # Extract new complete HSV features
             features = camera_features(processed_file)
 
+            # Classification (unchanged)
             if model is not None:
                 try:
                     x = np.array([features])
@@ -231,9 +278,19 @@ def camera_prepro(image_path, threaded=False, on_complete=None):
 def save_features_to_csv(features, filepath, label):
     df = pd.DataFrame(
         [[label] + features],
-        columns=["Label", "H_mean", "S_mean", "V_mean"]
+        columns=[
+            "Label",
+            "H_mean", "S_mean", "V_mean",
+            "H_std", "S_std", "V_std",
+            "H_skew", "S_skew", "V_skew",
+            "H_kurt", "S_kurt", "V_kurt",
+            "GLCM_contrast", "GLCM_dissimilarity",
+            "GLCM_homogeneity", "GLCM_energy",
+            "GLCM_correlation", "GLCM_ASM"
+        ]
     )
     df.to_csv(filepath, mode="a", header=not Path(filepath).exists(), index=False)
+
 
 
 # Page manager
