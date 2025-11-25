@@ -1,0 +1,7 @@
+{
+    "AudioSettings": {
+        "SampleRate": 44100,
+        "Channels": 1,
+        "Format": "WAV"
+    }
+}
