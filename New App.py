@@ -15,27 +15,92 @@ from PIL import Image, ImageTk
 from scipy.stats import skew, kurtosis
 from sklearn.preprocessing import StandardScaler
 
-# Globals
+# --- AUDIO IMPORTS ---
+import pyaudio
+import wave
+import librosa
+
+# ---------------------------------------------------------
+# GLOBALS & STATE
+# ---------------------------------------------------------
 video_capture = None
 picam = None
 camera_after = None
 
-selected_file = None
-selected_label = None
+selected_file = None       # Image file path
+selected_audio_file = None # Audio file path
 
-processed_file = None
-hsv_class = None
+# Global dictionary to hold results from both steps
+processing_results = {
+    "image_probs": None, 
+    "image_score": 0.0,   
+    "image_class": None,  
+    "audio_probs": None,  
+    "audio_score": 0.0,
+    "audio_class": None
+}
 
 USE_PICAMERA2 = False
 
-# Try loading models
+# --- CONFIGURATION ---
+SOLENOID_PIN = 17
+SAMPLE_RATE = 48000
+CHUNK_SIZE = 4096
+RECORD_SECONDS = 3
+N_MFCC = 40
+F_MIN = 50  # Low-cut filter for audio features
+
+# --- HARDWARE SETUP (MOCK & REAL) ---
 try:
-    scaler = joblib.load("camera_scaler.pkl")
-    model = load("camera_model.pkl")
+    import RPi.GPIO as GPIO
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(SOLENOID_PIN, GPIO.OUT)
+    PLATFORM = "PI"
+except (ImportError, RuntimeError):
+    PLATFORM = "PC"
+    class MockGPIO:
+        BCM = "BCM"
+        OUT = "OUT"
+        HIGH = 1
+        LOW = 0
+        @staticmethod
+        def setmode(mode): pass
+        @staticmethod
+        def setup(pin, mode): pass
+        @staticmethod
+        def output(pin, state):
+            if state: print(f"[MOCK] Solenoid STRIKE!")
+        @staticmethod
+        def cleanup(): pass
+    GPIO = MockGPIO
+
+
+# ---------------------------------------------------------
+# MODEL LOADING
+# ---------------------------------------------------------
+
+# 1. LOAD CAMERA MODELS
+try:
+    cam_scaler = joblib.load("camera_scaler.pkl")
+    cam_model = load("camera_model.pkl")
+    print("[INFO] Camera models loaded.")
 except Exception as e:
-    print(f"[WARN] Model/Scaler not loaded: {e}")
-    scaler = None
-    model = None
+    print(f"[WARN] Camera Model/Scaler not loaded: {e}")
+    cam_scaler = None
+    cam_model = None
+
+# 2. LOAD AUDIO MODELS
+try:
+    # We rename variables to avoid conflict with camera models
+    audio_model = joblib.load("svm_audio_model.pkl")
+    audio_scaler = joblib.load("scaler.pkl") # The audio scaler
+    audio_encoder = joblib.load("encoder.pkl")
+    print("[INFO] Audio models loaded.")
+except Exception as e:
+    print(f"[WARN] Audio Models not loaded: {e}")
+    audio_model = None
+    audio_scaler = None
+    audio_encoder = None
 
 try:
     from picamera2 import Picamera2
@@ -45,26 +110,20 @@ except Exception as e:
     USE_PICAMERA2 = False
 
 
-# Paths 
-if getattr(sys, 'frozen', False):  # Running as EXE
+# ---------------------------------------------------------
+# PATHS & THEME
+# ---------------------------------------------------------
+if getattr(sys, 'frozen', False):
     base_dir = Path(sys.executable).parent
 else:
     base_dir = Path(__file__).parent
 
-csv_path = base_dir / "coconut_features.csv"
 folder_path1 = base_dir / "Data Collection Captures"
-folder_path2 = base_dir / "Data Detection Captures"
+folder_path2 = base_dir / "Data Detection Captures" # Use this for detection temp files
 os.makedirs(folder_path1, exist_ok=True)
 os.makedirs(folder_path2, exist_ok=True)
 
-
-# Theme Helpers
 ctk.set_appearance_mode("Light")
-try:
-    ctk.set_default_color_theme("theme.json")
-except Exception:
-    pass
-
 BG = "#E8E5DA"
 BTN = "#2E8B57"
 BTN_HOVER = "#58D68D"
@@ -76,11 +135,12 @@ FONT_SUB = ("Arial", 36, "bold")
 FONT_NORMAL = ("Arial", 18)
 
 
-# Window setup
+# ---------------------------------------------------------
+# MAIN WINDOW SETUP
+# ---------------------------------------------------------
 root = ctk.CTk()
 root.title("COCONUTZ - Coconut Type Classifier")
 
-# Force the same 5-inch LCD size (landscape 800x480) on PC, fullscreen on Pi
 _machine = platform.machine().lower()
 if ("arm" in _machine) or ("raspberry" in _machine):
     root.attributes("-fullscreen", True)
@@ -89,571 +149,420 @@ else:
     root.resizable(False, False)
 
 root.configure(fg_color=BG)
-root.update_idletasks()
-
-# Main container where pages live (use grid inside)
 main_container = ctk.CTkFrame(root, fg_color=BG, corner_radius=0)
 main_container.pack(fill="both", expand=True)
-# make main_container act like a grid parent
 main_container.grid_rowconfigure(0, weight=1)
 main_container.grid_columnconfigure(0, weight=1)
 
 current_page_frame = None
 
-#  UI Helpers
-def make_button(master, text, command, width=None, height=None, font=FONT_NORMAL):
+
+# ---------------------------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------------------------
+def make_button(master, text, command, width=None, height=None, font=FONT_NORMAL, fg_color=BTN):
     btn = ctk.CTkButton(
-        master,
-        text=text,
-        command=command,
-        fg_color=BTN,
-        hover_color=BTN_HOVER,
-        text_color="white",
-        corner_radius=10,
-        font=font
+        master, text=text, command=command,
+        fg_color=fg_color, hover_color=BTN_HOVER,
+        text_color="white", corner_radius=10, font=font
     )
-    if width or height:
-        btn.configure(width=width, height=height)
+    if width: btn.configure(width=width)
+    if height: btn.configure(height=height)
     return btn
 
 def make_label(master, text, font=FONT_NORMAL, anchor="center"):
-    lbl = ctk.CTkLabel(master, text=text, font=font, text_color=TEXT, anchor=anchor)
-    return lbl
-
-def make_textbox(master, text, font=FONT_NORMAL):
-    tb = ctk.CTkTextbox(master, width=200, height=150, corner_radius=8)
-    tb.insert("0.0", text)
-    tb.configure(state="disabled")
-    return tb
-
+    return ctk.CTkLabel(master, text=text, font=font, text_color=TEXT, anchor=anchor)
 
 def stop_camera():
     global video_capture, picam, camera_after
-    try:
-        if camera_after is not None:
-            root.after_cancel(camera_after)
-    except Exception:
-        pass
+    if camera_after: root.after_cancel(camera_after)
     camera_after = None
-
-    try:
-        if video_capture is not None:
-            if hasattr(video_capture, "isOpened") and video_capture.isOpened():
-                video_capture.release()
-            video_capture = None
-    except Exception:
-        video_capture = None
-
-    try:
-        if picam is not None:
-            try:
-                picam.stop()
-                picam.close()
-            except Exception:
-                pass
-            picam = None
-    except Exception:
+    if video_capture and hasattr(video_capture, "release"): video_capture.release()
+    video_capture = None
+    if picam:
+        try: picam.stop(); picam.close()
+        except: pass
         picam = None
 
-
-# Camera preprocessing and Features
-
-def compute_moments(pixel_array):
+# --- SCORE CALCULATION ---
+def calculate_maturity_score(probs_dict):
     """
-    Computes the 4 color moments: Mean, Std Dev, Skewness, Kurtosis.
-    Returns 0 for all if the array is empty.
+    Calculates 0-100 score based on probabilities.
+    Malauhog=0, Malakanin=50, Malakatad=100.
     """
-    if len(pixel_array) == 0:
-        return 0.0, 0.0, 0.0, 0.0
+    if not probs_dict: return 0.0
+    p_hog = probs_dict.get('malauhog', 0.0)
+    p_kan = probs_dict.get('malakanin', 0.0)
+    p_tad = probs_dict.get('malakatad', 0.0)
     
-    # Handle edge case where all pixels are identical (std = 0)
-    if len(np.unique(pixel_array)) == 1:
-        return float(pixel_array[0]), 0.0, 0.0, 0.0
+    # Weighted calculation
+    score = (p_hog * 0) + (p_kan * 50) + (p_tad * 100)
+    return score
 
+# ---------------------------------------------------------
+# FEATURE EXTRACTION (IMAGE & AUDIO)
+# ---------------------------------------------------------
+def compute_moments(pixel_array):
+    if len(pixel_array) == 0: return 0.0, 0.0, 0.0, 0.0
+    if len(np.unique(pixel_array)) == 1: return float(pixel_array[0]), 0.0, 0.0, 0.0
     m1 = np.mean(pixel_array)
     m2 = np.std(pixel_array)
-    m3 = skew(pixel_array, bias=False)
-    m4 = kurtosis(pixel_array, bias=False)
-    
-    # Handle NaN results from scipy if sample size is too small
-    m3 = 0.0 if np.isnan(m3) else m3
-    m4 = 0.0 if np.isnan(m4) else m4
-
+    m3 = skew(pixel_array, bias=False); m3 = 0.0 if np.isnan(m3) else m3
+    m4 = kurtosis(pixel_array, bias=False); m4 = 0.0 if np.isnan(m4) else m4
     return m1, m2, m3, m4
 
 def camera_features(image_path):
     img = cv2.imread(image_path)
-    if img is None:
-        print(f"[ERROR] Could not read image for features: {image_path}")
-        return [0.0] * 108  # Return 108 zeros if failed
-
-    # 1. Convert to HSV
+    if img is None: return [0.0] * 108
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # 2. Binary Mask (Exclude Black Background)
-    lower = np.array([1, 1, 1]) 
-    upper = np.array([255, 255, 255])
+    lower, upper = np.array([1, 1, 1]), np.array([255, 255, 255])
     mask = cv2.inRange(img, lower, upper)
-
-    # 3. Find Bounding Box (ROI) of the object
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        return [0.0] * 108 # Image is purely black
-
-    # Find largest contour
+    if not contours: return [0.0] * 108
     c = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(c)
-
-    # Crop HSV image and Mask to the bounding box
     roi_hsv = hsv[y:y+h, x:x+w]
     roi_mask = mask[y:y+h, x:x+w]
-
-    # 4. Split into 3x3 Grid
-    step_h = h // 3
-    step_w = w // 3
-    
+    step_h, step_w = h // 3, w // 3
     feature_vector = []
-
-    # Loop through 3 rows and 3 columns
     for row in range(3):
         for col in range(3):
-            # Calculate tile coordinates
-            y_start = row * step_h
-            y_end = (row + 1) * step_h if row < 2 else h
-            x_start = col * step_w
-            x_end = (col + 1) * step_w if col < 2 else w
-
-            # Extract Tile
-            tile_hsv = roi_hsv[y_start:y_end, x_start:x_end]
-            tile_mask = roi_mask[y_start:y_end, x_start:x_end]
-
-            # Separate Channels
-            h_c = tile_hsv[:, :, 0]
-            s_c = tile_hsv[:, :, 1]
-            v_c = tile_hsv[:, :, 2]
-
-            # Filter pixels: Only take pixels where mask is NOT black
-            valid_h = h_c[tile_mask > 0]
-            valid_s = s_c[tile_mask > 0]
-            valid_v = v_c[tile_mask > 0]
-
-            # Compute Moments for H, S, V and append
-            feature_vector.extend(compute_moments(valid_h)) 
-            feature_vector.extend(compute_moments(valid_s)) 
-            feature_vector.extend(compute_moments(valid_v)) 
-
+            y_s, y_e = row*step_h, (row+1)*step_h if row<2 else h
+            x_s, x_e = col*step_w, (col+1)*step_w if col<2 else w
+            tile_hsv = roi_hsv[y_s:y_e, x_s:x_e]
+            tile_mask = roi_mask[y_s:y_e, x_s:x_e]
+            for i in range(3):
+                feature_vector.extend(compute_moments(tile_hsv[:,:,i][tile_mask>0]))
     return feature_vector
 
+# --- AUDIO FEATURE EXTRACTION ---
+def extract_audio_features(file_path):
+    try:
+        # Load without res_type to avoid resampy error (uses soxr)
+        audio, sr = librosa.load(file_path)
+        # Extract MFCCs with low-cut filter (fmin=50) to ignore hum/DC
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=N_MFCC, fmin=F_MIN)
+        # Average across time
+        return np.mean(mfccs.T, axis=0)
+    except Exception as e:
+        print(f"Audio Feat Error: {e}")
+        return None
 
+# --- IMAGE PREPROCESSING TASK ---
 def camera_prepro(image_path, threaded=False, on_complete=None):
     def process_task():
-        global hsv_class
-        processed_file_local = None
-        hsv_class_local = None
-
+        global processing_results
         try:
             img = cv2.imread(image_path)
-            if img is None:
-                raise ValueError("Unreadable image")
-
+            if img is None: raise ValueError("Unreadable image")
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            lower = np.array([5, 30, 30])
-            upper = np.array([90, 255, 255])
-            mask = cv2.inRange(hsv, lower, upper)
-
-            # ---------- ADD: Blob filtering (largest connected component) ----------
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            mask = cv2.inRange(hsv, np.array([5, 30, 30]), np.array([90, 255, 255]))
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
             if num_labels > 1:
                 largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
                 mask = np.uint8(labels == largest_label) * 255
-            else:
-                 # Fallback if no blobs found (creates black image)
-                mask = np.zeros_like(mask)
-
-            # ---------- ADD: Hole filling ----------
-            mask_filled = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
-            mask = mask_filled
-
-            # ---------- (KEEP) Morphological operations ----------
-            kernel = np.ones((3, 3), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-            # Apply mask to color image
+            else: mask = np.zeros_like(mask)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
             masked_img = cv2.bitwise_and(img, img, mask=mask)
-
-            # ---------- (KEEP) Final step: Resize ----------
-            resized_img = cv2.resize(masked_img, (224, 224))
-
             processed_file_local = os.path.splitext(image_path)[0] + "_processed.jpg"
-            cv2.imwrite(processed_file_local, resized_img)
+            cv2.imwrite(processed_file_local, cv2.resize(masked_img, (224, 224)))
 
-            # Extract new complete HSV features
             features = camera_features(processed_file_local)
-
-            # Classification (updated for fuzzy output)
-            if model is not None and scaler is not None:
-                try:
-                    x = np.array([features])
-                    # scale before prediction
-                    x_scaled = scaler.transform(x)
-                    # fuzzy prob output
-                    probs = model.predict_proba(x_scaled)[0]
-                    # fixed class mapping (your label meaning)
-                    class_map = {
-                        0: "malauhog",
-                        1: "malakanin",
-                        2: "malakatad"
-                    }
-                    hsv_class_local = {
-                        class_map[i]: float(probs[i])
-                        for i in range(len(probs))
-                    }
-                except Exception as e:
-                    print("[ERROR] Model prediction failed:", e)
-                    hsv_class_local = None
+            
+            if cam_model and cam_scaler:
+                x_scaled = cam_scaler.transform([features])
+                probs = cam_model.predict_proba(x_scaled)[0]
+                class_map = {0: "malauhog", 1: "malakanin", 2: "malakatad"}
+                img_probs = {class_map[i]: float(probs[i]) for i in range(len(probs))}
+                
+                # STORE IN GLOBAL RESULTS
+                processing_results["image_probs"] = img_probs
+                processing_results["image_score"] = calculate_maturity_score(img_probs)
+                processing_results["image_class"] = max(img_probs, key=img_probs.get)
             else:
-                print("[WARN] Model or Scaler missing, skipping prediction.")
-                hsv_class_local = None
-
+                processing_results["image_probs"] = None
+            
+            return processed_file_local, True
         except Exception as e:
-            print(f"[ERROR] Preprocessing/classification failed: {e}")
-            processed_file_local, hsv_class_local = None, None
+            print(f"Img Process Error: {e}")
+            return None, False
 
-        # Handle completion
-        if threaded and callable(on_complete):
-            root.after(0, lambda: on_complete(processed_file_local, hsv_class_local))
-        elif not threaded:
-            return processed_file_local, hsv_class_local
-
-    # Threaded or synchronous execution
     if threaded:
-        threading.Thread(target=process_task, daemon=True).start()
-        return None, None
+        def thread_wrapper():
+            res_path, success = process_task()
+            if on_complete: root.after(0, lambda: on_complete(res_path, success))
+        threading.Thread(target=thread_wrapper, daemon=True).start()
     else:
         return process_task()
 
 
-
-def save_features_to_csv(features, filepath, label):
-    # Dynamic Column Generation for 3x3 Grid 
-    # (9 tiles * 3 channels * 4 moments = 108 columns)
-    cols = ["Label"]
-    channels = ['H', 'S', 'V']
-    moments = ['Mean', 'Std', 'Skew', 'Kurt']
-    
-    for i in range(1, 10): # Tiles 1 to 9
-        for c in channels:
-            for m in moments:
-                cols.append(f"T{i}_{c}_{m}")
-
-    df = pd.DataFrame(
-        [[label] + features],
-        columns=cols
-    )
-    df.to_csv(filepath, mode="a", header=not Path(filepath).exists(), index=False)
-
-
-
-# Page manager
+# ---------------------------------------------------------
+# PAGE MANAGER
+# ---------------------------------------------------------
 pages = {}
-
-def clear_current_page():
-    global current_page_frame
-    try:
-        stop_camera()
-    except Exception:
-        pass
-    if current_page_frame is not None:
-        current_page_frame.destroy()
-        current_page_frame = None
-
 def switch_page(page_name):
     global current_page_frame
-    clear_current_page()
+    stop_camera()
+    if current_page_frame: current_page_frame.destroy()
     if page_name in pages:
         current_page_frame = pages[page_name]()
-        # place the page into the main_container grid (row 0 col 0)
         current_page_frame.grid(row=0, column=0, sticky="nsew")
-    else:
-        print(f"[WARN] Unknown page: {page_name}")
+    else: print(f"[WARN] Unknown page: {page_name}")
 
-# ------------------------
-# UI Page implementations
-# ------------------------
 
-# ---- Main Page ----
+# ---- PAGE 1: MAIN MENU ----
 def load_main_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
-    frame.grid(row=0, column=0, sticky="nsew")
-
-    frame.grid_rowconfigure(0, weight=2)   
+    frame.grid_rowconfigure(0, weight=2)
     frame.grid_rowconfigure(1, weight=6)   
     frame.grid_columnconfigure(0, weight=1)
-
-    title_label = make_label(frame, "COCONUTZ\n Coconut Maturity Classifier", font=FONT_TITLE)
-    title_label.grid(row=0, column=0, pady=(60, 30), sticky="n")
-
-    button_frame = ctk.CTkFrame(frame, fg_color="transparent")
-    button_frame.grid(row=1, column=0, sticky="n")
-    button_frame.grid_columnconfigure(0, weight=1)
-
-    btn_pad = 15
-
-    btn_data_detection = make_button(button_frame, "Data Detection", lambda: switch_page("data_detection1")
-)
-    btn_data_detection.grid(row=0, column=0, pady=btn_pad, padx=8, ipadx=30, ipady=10, sticky="ew")
-
-    btn_exit = make_button(button_frame, "Exit", root.destroy)
-    btn_exit.grid(row=2, column=0, pady=(btn_pad, 40), padx=8, sticky="ew")
-
-    button_frame.grid_propagate(False)
-
+    make_label(frame, "COCONUTZ\n Coconut Maturity Classifier", font=FONT_TITLE).grid(row=0, column=0, pady=(60, 30), sticky="n")
+    btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
+    btn_frame.grid(row=1, column=0, sticky="n")
+    make_button(btn_frame, "Data Detection", lambda: switch_page("data_detection1")).grid(row=0, column=0, pady=15, ipadx=30, ipady=10)
+    make_button(btn_frame, "Exit", root.destroy).grid(row=2, column=0, pady=40, ipadx=30)
     return frame
+pages["main"] = load_main_page      
 
-
-pages["main"] = load_main_page
-
-# ---- Data Detection Page 1 (Capture) ----
+# ---- PAGE 2: IMAGE CAPTURE ----
 def load_data_detection_page_1():
     global video_capture, picam, camera_after, selected_file
-
     frame = ctk.CTkFrame(main_container, fg_color=BG)
-    frame.grid_rowconfigure(0, weight=1)
     frame.grid_rowconfigure(1, weight=4)
-    frame.grid_rowconfigure(2, weight=1)
     frame.grid_columnconfigure(0, weight=1)
-    frame.grid_columnconfigure(1, weight=1)
-
-    header = make_label(frame, "Image Capture", font=FONT_SUB)
-    header.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=6)
-
+    make_label(frame, "Image Capture", font=FONT_SUB).grid(row=0, column=0, pady=6)
+    
     cam_card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=12)
-    cam_card.grid(row=1, column=0, columnspan=2, padx=12, pady=8, sticky="nsew")
-    cam_card.grid_rowconfigure(0, weight=1)
-    cam_card.grid_columnconfigure(0, weight=1)
-
+    cam_card.grid(row=1, column=0, padx=12, pady=8, sticky="nsew")
     cam_canvas = Canvas(cam_card, bg="#5A56C8", highlightthickness=0)
-    cam_canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+    cam_canvas.pack(fill="both", expand=True, padx=8, pady=8)
 
     selected_file = None
     stop_camera()
 
-    if USE_PICAMERA2:
-        print("Using PiCamera2 (Raspberry Pi Camera)")
-        picam = Picamera2()
-        preview_config = picam.create_preview_configuration(main={"size": (640, 480)})
-        picam.configure(preview_config)
-        picam.start()
+    def update_frame(img_arr):
+        if img_arr is None: return
+        w, h = cam_canvas.winfo_width(), cam_canvas.winfo_height()
+        if w < 10: w, h = 560, 280
+        img = Image.fromarray(cv2.resize(img_arr, (w, h)))
+        imgtk = ImageTk.PhotoImage(image=img)
+        cam_canvas.create_image(0, 0, image=imgtk, anchor="nw")
+        cam_canvas.image = imgtk
 
-        def update_frame_picam():
+    if USE_PICAMERA2:
+        picam = Picamera2()
+        picam.configure(picam.create_preview_configuration(main={"size": (640, 480)}))
+        picam.start()
+        def loop_pi():
             global camera_after
             try:
-                frame_arr = picam.capture_array()
-                frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
-                frame_rgb = frame_arr
-                w = cam_canvas.winfo_width() or 560
-                h = cam_canvas.winfo_height() or 280
-                frame_resized = cv2.resize(frame_rgb, (w, h))
-                img = Image.fromarray(frame_resized)
-                imgtk = ImageTk.PhotoImage(image=img)
-                cam_canvas.create_image(0, 0, image=imgtk, anchor="nw")
-                cam_canvas.image = imgtk
-            except Exception:
-                stop_camera()
-                return
-            camera_after = root.after(10, update_frame_picam)
-
-        def capture_and_next():
+                frame_arr = cv2.rotate(picam.capture_array(), cv2.ROTATE_180)
+                update_frame(frame_arr)
+                camera_after = root.after(30, loop_pi)
+            except: stop_camera()
+        loop_pi()
+        def capture():
             global selected_file
             try:
-                frame_arr = picam.capture_array()
-                frame_arr = cv2.rotate(frame_arr, cv2.ROTATE_180)
-                timestamp = time.strftime('%Y%m%d-%H%M%S')
-                tmp_name = f"tmp_capture_{timestamp}.jpg"
-                tmp_path = folder_path1 / tmp_name
-                cv2.imwrite(str(tmp_path), cv2.cvtColor(frame_arr, cv2.COLOR_RGB2BGR))
-                selected_file = str(tmp_path)
+                frame_arr = cv2.rotate(picam.capture_array(), cv2.ROTATE_180)
+                path = folder_path2 / f"detect_img_{time.strftime('%Y%m%d-%H%M%S')}.jpg"
+                cv2.imwrite(str(path), cv2.cvtColor(frame_arr, cv2.COLOR_RGB2BGR))
+                selected_file = str(path)
                 stop_camera()
                 switch_page("data_detection2")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to Capture: {e}")
-
-        update_frame_picam()
-
+            except Exception as e: messagebox.showerror("Error", str(e))
     else:
-        print("Using OpenCV VideoCapture (Webcam)")
         video_capture = cv2.VideoCapture(0)
-
-        def update_frame_cam():
+        def loop_cv():
             global camera_after
             try:
-                if video_capture is None:
-                    return
-                ret, frame_arr = video_capture.read()
-                if ret:
-                    frame_rgb = cv2.cvtColor(frame_arr, cv2.COLOR_BGR2RGB)
-                    w = cam_canvas.winfo_width() or 560
-                    h = cam_canvas.winfo_height() or 280
-                    if w <= 0: w = 560
-                    if h <= 0: h = 280
-                    frame_resized = cv2.resize(frame_rgb, (w, h))
-                    img = Image.fromarray(frame_resized)
-                    imgtk = ImageTk.PhotoImage(image=img)
-                    cam_canvas.create_image(0, 0, image=imgtk, anchor="nw")
-                    cam_canvas.image = imgtk
-            except Exception:
-                stop_camera()
-                return
-            camera_after = root.after(30, update_frame_cam)
-
-        def capture_and_next():
+                ret, frame = video_capture.read()
+                if ret: update_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                camera_after = root.after(30, loop_cv)
+            except: stop_camera()
+        loop_cv()
+        def capture():
             global selected_file
             try:
-                if video_capture is None:
-                    messagebox.showerror("Camera Error", "Camera not initialized.")
-                    return
-                ret, frame_arr = video_capture.read()
+                ret, frame = video_capture.read()
                 if ret:
-                    timestamp = time.strftime('%Y%m%d-%H%M%S')
-                    tmp_name = f"tmp_capture_{timestamp}.jpg"
-                    tmp_path = folder_path1 / tmp_name
-                    cv2.imwrite(str(tmp_path), frame_arr)
-                    selected_file = str(tmp_path)
+                    path = folder_path2 / f"detect_img_{time.strftime('%Y%m%d-%H%M%S')}.jpg"
+                    cv2.imwrite(str(path), frame)
+                    selected_file = str(path)
                     stop_camera()
                     switch_page("data_detection2")
-                else:
-                    messagebox.showerror("Capture Error", "Failed to read frame from camera.")
-            except Exception as e:
-                messagebox.showerror("Capture Error", f"Failed to Capture: {e}")
-
-        update_frame_cam()
+            except Exception as e: messagebox.showerror("Error", str(e))
 
     controls = ctk.CTkFrame(frame, fg_color=BG)
-    controls.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6,12), padx=8)
-    controls.grid_columnconfigure(0, weight=1)
-    controls.grid_columnconfigure(1, weight=1)
-
-    capture_btn = make_button(controls, "Feature Extraction", capture_and_next)
-    capture_btn.grid(row=0, column=0, padx=6, ipadx=20, ipady=8, sticky="e")
-
-    back_btn = make_button(controls, "Main Menu", lambda: [stop_camera(), switch_page("main")])
-    back_btn.grid(row=0, column=1, padx=6, ipadx=8, ipady=8, sticky="w")
-
+    controls.grid(row=2, column=0, pady=10)
+    make_button(controls, "Capture", capture).pack(side="left", padx=10)
+    make_button(controls, "Back", lambda: [stop_camera(), switch_page("main")]).pack(side="left", padx=10)
     return frame
-
 pages["data_detection1"] = load_data_detection_page_1
 
-# ---- Data Detection Page 2 (Show captured image) ----
+# ---- PAGE 3: IMAGE PREVIEW ----
 def load_data_detection_page_2():
-    global selected_file
-
     frame = ctk.CTkFrame(main_container, fg_color=BG)
-    frame.grid_rowconfigure(0, weight=1)
-    frame.grid_rowconfigure(1, weight=4)
-    frame.grid_rowconfigure(2, weight=1)
+    frame.grid_rowconfigure(1, weight=1)
     frame.grid_columnconfigure(0, weight=1)
-
-    header = make_label(frame, "Captured Image", font=FONT_SUB)
-    header.grid(row=0, column=0, sticky="nsew", pady=6)
-
-    if not selected_file or not os.path.exists(selected_file):
-        make_label(frame, "No image captured!", font=FONT_NORMAL).grid(row=1, column=0, pady=10)
-    else:
-        try:
-            canvas_card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=12)
-            canvas_card.grid(row=1, column=0, padx=12, pady=8, sticky="nsew")
-            canvas_card.grid_rowconfigure(0, weight=1)
-            canvas_card.grid_columnconfigure(0, weight=1)
-
-            tk_canvas = Canvas(canvas_card, bg="#5A56C8", highlightthickness=0)
-            tk_canvas.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-
-            def update_preview():
-                try:
-                    img = Image.open(selected_file)
-                    w = tk_canvas.winfo_width() or 560
-                    h = tk_canvas.winfo_height() or 280
-                    img = img.resize((w, h), Image.LANCZOS)
-                    imgtk = ImageTk.PhotoImage(image=img)
-                    tk_canvas.create_image(0, 0, image=imgtk, anchor="nw")
-                    tk_canvas.image = imgtk
-                except Exception:
-                    pass
-                tk_canvas.after(200, update_preview)
-
-            update_preview()
-
-        except Exception as e:
-            make_label(frame, f"Error loading image: {e}", font=FONT_NORMAL).grid(row=1, column=0, pady=10)
-
-    btn_row = ctk.CTkFrame(frame, fg_color=BG)
-    btn_row.grid(row=2, column=0, pady=(6,12), sticky="nsew")
-    btn_row.grid_columnconfigure((0,1), weight=1)
-
-    make_button(btn_row, "Try Again", lambda: switch_page("data_detection1")).grid(row=0, column=0, padx=8, ipadx=16, ipady=6, sticky="e")
-    make_button(btn_row, "Proceed", lambda: (camera_prepro(selected_file), switch_page("data_detection3"))).grid(row=0, column=1, padx=8, ipadx=16, ipady=6, sticky="w")
-
+    make_label(frame, "Captured Image", font=FONT_SUB).grid(row=0, column=0, pady=6)
+    if selected_file:
+        img = Image.open(selected_file)
+        img.thumbnail((500, 300))
+        imgtk = ImageTk.PhotoImage(img)
+        lbl = ctk.CTkLabel(frame, image=imgtk, text="")
+        lbl.image = imgtk
+        lbl.grid(row=1, column=0)
+    
+    btns = ctk.CTkFrame(frame, fg_color=BG)
+    btns.grid(row=2, column=0, pady=20)
+    make_button(btns, "Retake", lambda: switch_page("data_detection1")).pack(side="left", padx=10)
+    make_button(btns, "Next: Process", lambda: switch_page("data_detection3")).pack(side="left", padx=10)
     return frame
-
 pages["data_detection2"] = load_data_detection_page_2
 
-# ---- Data Detection Page 3 (Processing) ----
+# ---- PAGE 4: IMAGE PROCESSING ----
 def load_data_detection_page_3():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
-    frame.grid_rowconfigure(0, weight=1)
-    frame.grid_columnconfigure(0, weight=1)
+    frame.pack(fill="both", expand=True)
+    make_label(frame, "Processing Image...", font=FONT_SUB).place(relx=0.5, rely=0.5, anchor="center")
 
-    status = make_label(frame, "Processing Image...", font=FONT_SUB)
-    status.grid(row=0, column=0, sticky="nsew", pady=8)
-
-    def on_detection_done(processed_path, result):
-        global hsv_class
-        hsv_class = result
-        if result is not None:
-            switch_page("data_detection5") # DIRECT TO SUMMARY
-        else:
-            messagebox.showerror("Detection Failed", "Could not process or classify the image.")
+    def done(path, success):
+        if success: 
+            # Redirect to Audio Page (detection4) instead of summary
+            switch_page("data_detection4")
+        else: 
+            messagebox.showerror("Error", "Image Processing failed")
             switch_page("data_detection1")
 
-    # Start threaded preprocessing and classification
     if selected_file:
-        camera_prepro(selected_file, threaded=True, on_complete=on_detection_done)
-    else:
-        messagebox.showwarning("No Image", "Please select an image before detection.")
-        switch_page("data_detection1")
-
+        camera_prepro(selected_file, threaded=True, on_complete=done)
     return frame
-
 pages["data_detection3"] = load_data_detection_page_3
 
-# ---- Data Detection Page 4 (Audio placeholder - skipping for now in logic, but keeping) ----
-def load_data_detection_page_4():
+# ---- PAGE 4.5: AUDIO RECORDING & ANALYSIS ----
+def load_data_detection_audio_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
-    frame.grid_rowconfigure(0, weight=2)
+    frame.grid_rowconfigure(0, weight=1)
     frame.grid_rowconfigure(1, weight=1)
     frame.grid_rowconfigure(2, weight=1)
     frame.grid_columnconfigure(0, weight=1)
-    frame.grid_columnconfigure(1, weight=1)
-    frame.grid_columnconfigure(2, weight=1)
 
-    header = make_label(frame, "Audio Data Capture", font=FONT_TITLE)
-    header.grid(row=0, column=1, sticky="nsew", pady=8)
+    make_label(frame, "Audio Detection", font=FONT_TITLE).grid(row=0, pady=20)
+    status_lbl = make_label(frame, "Position Solenoid & Press Start", font=FONT_NORMAL)
+    status_lbl.grid(row=1, pady=10)
 
-    next_btn = make_button(frame, "Activate Solenoid", lambda: switch_page("data_detection5"))
-    next_btn.grid(row=1, column=1, pady=6, ipadx=30, ipady=12, sticky="w")
+    def trigger_solenoid():
+        GPIO.output(SOLENOID_PIN, GPIO.HIGH)
+        time.sleep(0.05)
+        GPIO.output(SOLENOID_PIN, GPIO.LOW)
 
-    back_btn = make_button(frame, "Back", lambda: switch_page("main"))
-    back_btn.grid(row=1, column=1, pady=(6,12), ipadx=30, ipady=10, sticky="e")
+    def process_audio_result(audio_path):
+        global processing_results
+        
+        # 1. Extract
+        features = extract_audio_features(audio_path)
+        
+        # 2. Predict
+        if features is not None and audio_model and audio_scaler:
+            try:
+                # Scale
+                x = np.array([features])
+                x_scaled = audio_scaler.transform(x)
+                
+                # Probability
+                probs = audio_model.predict_proba(x_scaled)[0]
+                classes = audio_encoder.classes_
+                
+                # Map results
+                aud_probs = {cls_name: float(prob) for cls_name, prob in zip(classes, probs)}
+                
+                # Save Global Results
+                processing_results["audio_probs"] = aud_probs
+                processing_results["audio_score"] = calculate_maturity_score(aud_probs)
+                processing_results["audio_class"] = max(aud_probs, key=aud_probs.get)
+                
+                print(f"[AUDIO] Score: {processing_results['audio_score']:.2f}")
+                switch_page("data_detection5") # Go to Summary
+            except Exception as e:
+                print(f"Prediction Error: {e}")
+                messagebox.showerror("Error", f"Prediction Error: {e}")
+                switch_page("main")
+        else:
+            messagebox.showerror("Error", "Audio Analysis Failed (Check Models)")
+            switch_page("main")
 
+    def start_recording():
+        btn_rec.configure(state="disabled", text="RECORDING...", fg_color="#555")
+        
+        def run_thread():
+            try:
+                ts = time.strftime('%Y%m%d-%H%M%S')
+                temp_audio_path = folder_path2 / f"detect_audio_{ts}.wav"
+                
+                p = pyaudio.PyAudio()
+                
+                # --- I2S SEARCH ---
+                idx = 1
+                for i in range(p.get_device_count()):
+                    name = p.get_device_info_by_index(i).get('name', '').lower()
+                    if any(k in name for k in ["i2s", "snd_rpi", "simple"]):
+                        idx = i; break
+                
+                stream = p.open(format=pyaudio.paInt16, channels=1, rate=SAMPLE_RATE, input=True, input_device_index=idx, frames_per_buffer=CHUNK_SIZE)
+                
+                frames = []
+                start_time = time.time()
+                tap_count = 0
+                
+                # --- 5dB GAIN CONFIGURATION ---
+                # 5dB = 10^(5/20) ~= 1.778
+                GAIN_DB = 5.0
+                gain_factor = 10 ** (GAIN_DB / 20.0)
+                
+                status_lbl.configure(text="Recording (5dB Boost)...", text_color="#E67E22")
+                
+                while (time.time() - start_time) < RECORD_SECONDS:
+                    raw = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                    
+                    # Apply Gain & DC Offset Fix
+                    data_np = np.frombuffer(raw, dtype=np.int16)
+                    data_np = data_np - np.mean(data_np) # DC Offset
+                    data_np = data_np * gain_factor      # 5dB Gain
+                    data_np = np.clip(data_np, -32768, 32767)
+                    
+                    frames.append(data_np.astype(np.int16).tobytes())
+                    
+                    elapsed = time.time() - start_time
+                    if tap_count < 3:
+                        if (elapsed > 0.5 and tap_count==0) or (elapsed > 1.5 and tap_count==1) or (elapsed > 2.5 and tap_count==2):
+                            trigger_solenoid(); tap_count += 1
+
+                stream.stop_stream(); stream.close(); p.terminate()
+                
+                wf = wave.open(str(temp_audio_path), 'wb')
+                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(b''.join(frames)); wf.close()
+                
+                status_lbl.configure(text="Analyzing...", text_color="blue")
+                root.after(100, lambda: process_audio_result(str(temp_audio_path)))
+                
+            except Exception as e:
+                print(e)
+                status_lbl.configure(text="Error", text_color="red")
+                btn_rec.configure(state="normal", text="START")
+
+        threading.Thread(target=run_thread, daemon=True).start()
+
+    btn_rec = make_button(frame, "START RECORDING", start_recording, width=250, height=60, fg_color="#D32F2F")
+    btn_rec.grid(row=2, pady=30)
     return frame
+pages["data_detection4"] = load_data_detection_audio_page
 
-pages["data_detection4"] = load_data_detection_page_4
 
-# ---- Data Detection Page 5 (Summary) ----
+# ---- PAGE 5: SUMMARY & RESULTS ----
 def load_data_detection_page_5():
-    global selected_file, hsv_class
+    global selected_file, processing_results
 
     frame = ctk.CTkFrame(main_container, fg_color="#E8E5DA")
     frame.grid(row=0, column=0, sticky="nsew")
@@ -719,73 +628,55 @@ def load_data_detection_page_5():
     make_label(info_frame, "Classification Summary", font=("Aerial", 24, "bold")).grid(
         row=0, column=0, sticky="n", pady=(10, 15)
     )
+    
+    # Calculate Average Score for final display (Simple average of Image + Audio score)
+    avg_score = (processing_results['image_score'] + processing_results['audio_score']) / 2
+    if avg_score < 33: final_decision = "MALAUHOG"
+    elif avg_score < 66: final_decision = "MALAKANIN"
+    else: final_decision = "MALAKATAD"
 
-    final_class = max(hsv_class, key=hsv_class.get) if hsv_class else "N/A"
-    make_label(info_frame, f"Final Class: {final_class}", font=("Aerial", 20, "bold")).grid(
+    make_label(info_frame, f"FINAL: {final_decision} ({avg_score:.1f})", font=("Aerial", 20, "bold")).grid(
         row=1, column=0, sticky="n", pady=(5, 10)
     )
 
-    # Camera/Audio section headers
+    # HEADERS
     header_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
     header_frame.grid(row=2, column=0, pady=(5, 5))
     header_frame.grid_columnconfigure((0, 1), weight=1, uniform="headers")
 
-    make_label(header_frame, "Camera Classification", font=FONT_NORMAL).grid(
-        row=0, column=0, sticky="ew"
-    )
-    make_label(header_frame, "Audio Classification", font=FONT_NORMAL).grid(
-        row=0, column=1, sticky="ew"
-    )
+    make_label(header_frame, "Camera", font=FONT_NORMAL).grid(row=0, column=0, sticky="ew")
+    make_label(header_frame, "Audio", font=FONT_NORMAL).grid(row=0, column=1, sticky="ew")
 
-    # Values for camera/audio
+    # VALUES (Probabilities)
     classes = ["malauhog", "malakanin", "malakatad"]
+    
+    img_probs = processing_results.get("image_probs", {})
+    aud_probs = processing_results.get("audio_probs", {})
+
     for i, cls in enumerate(classes):
         row_index = 3 + i
-        cam_val = hsv_class.get(cls, 0.0) if hsv_class else 0.0
-        aud_val = 0.0
+        # Safe get with default 0.0
+        cam_val = img_probs.get(cls, 0.0) if img_probs else 0.0
+        aud_val = aud_probs.get(cls, 0.0) if aud_probs else 0.0
+        
         val_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
         val_frame.grid(row=row_index, column=0, sticky="ew", pady=2)
         val_frame.grid_columnconfigure((0, 1), weight=1, uniform="vals")
 
-        make_label(val_frame, f"{cls}: {cam_val:.2f}", font=FONT_NORMAL).grid(
-            row=0, column=0, sticky="w", padx=10
-        )
-        make_label(val_frame, f"{cls}: {aud_val:.2f}", font=FONT_NORMAL).grid(
-            row=0, column=1, sticky="w", padx=10
-        )
+        make_label(val_frame, f"{cls.capitalize()}: {cam_val*100:.1f}%", font=FONT_NORMAL).grid(row=0, column=0, sticky="w", padx=20)
+        make_label(val_frame, f"{cls.capitalize()}: {aud_val*100:.1f}%", font=FONT_NORMAL).grid(row=0, column=1, sticky="w", padx=20)
+
+    # MATURITY SCORES ROW
+    score_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+    score_frame.grid(row=6, column=0, sticky="ew", pady=10)
+    score_frame.grid_columnconfigure((0, 1), weight=1, uniform="vals")
+    
+    make_label(score_frame, f"Score: {processing_results['image_score']:.1f}", font=("Arial", 16, "bold")).grid(row=0, column=0, sticky="w", padx=20)
+    make_label(score_frame, f"Score: {processing_results['audio_score']:.1f}", font=("Arial", 16, "bold")).grid(row=0, column=1, sticky="w", padx=20)
 
     # ==========================
-    # SAVE IMAGE + BACK BUTTON
+    # BUTTONS
     # ==========================
-    data_det_dir = Path("Data Detection Captures")
-    data_det_dir.mkdir(exist_ok=True)
-    try:
-        save_path = data_det_dir / f"{final_class}_{time.strftime('%Y%m%d-%H%M%S')}.jpg"
-        import shutil
-        shutil.copy(selected_file, save_path)
-        print(f"[INFO] Final classified image saved: {save_path}")
-
-        tmp_dir = Path(selected_file).parent
-        for tmp_file in tmp_dir.glob("tmp_capture_*.jpg"):
-            try:
-                tmp_file.unlink()
-                print(f"[CLEANUP] Deleted temp file: {tmp_file}")
-            except Exception as e:
-                print(f"[WARN] Could not delete {tmp_file}: {e}")
-
-        if Path(selected_file) != save_path and Path(selected_file).exists():
-            try:
-                Path(selected_file).unlink()
-                print(f"[CLEANUP] Deleted original capture: {selected_file}")
-            except Exception as e:
-                print(f"[WARN] Could not delete original capture: {e}")
-
-        selected_file = str(save_path)
-
-    except Exception as e:
-        print(f"[WARN] Failed to save classified image: {e}")
-
-    # ---- Bottom-aligned button ----
     make_button(info_frame, "Back to Main", lambda: switch_page("main")).grid(
         row=7, column=0, pady=(20, 10), sticky="se", padx=20
     )
@@ -798,16 +689,5 @@ pages["data_detection5"] = load_data_detection_page_5
 # App start
 # ----------------------------
 switch_page("main")
-
-# Add a keyboard shortcut to exit fullscreen on Pi (Esc)
-def on_key(event):
-    if event.keysym == "Escape":
-        try:
-            # toggle fullscreen off
-            root.attributes("-fullscreen", False)
-        except Exception:
-            pass
-
-root.bind("<Key>", on_key)
-
+root.bind("<Key>", lambda e: root.attributes("-fullscreen", False) if e.keysym == "Escape" else None)
 root.mainloop()
