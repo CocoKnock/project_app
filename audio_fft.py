@@ -18,7 +18,7 @@ from PIL import Image, ImageTk
 import pyaudio
 import wave
 
-# --- GRAPHING IMPORTS (NEW) ---
+# --- GRAPHING IMPORTS ---
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -47,7 +47,7 @@ except (ImportError, RuntimeError):
 
 # --- CONFIGURATION ---
 SOLENOID_PIN = 17
-SAMPLE_RATE = 48000  
+SAMPLE_RATE = 48000  # 48kHz is standard for I2S Mics (INMP441, etc.)
 CHUNK_SIZE = 4096    
 RECORD_SECONDS = 3
 
@@ -285,7 +285,7 @@ def load_data_collection_page_2():
     return frame
 pages["data_collection2"] = load_data_collection_page_2
 
-# ---- DATA COLLECTION (AUDIO) ----
+# ---- DATA COLLECTION (AUDIO) - 10dB GAIN VERSION ----
 def load_data_collection_audio_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(0, weight=1)
@@ -315,18 +315,21 @@ def load_data_collection_audio_page():
                 
                 p = pyaudio.PyAudio()
                 
-                # Device selection logic
+                # --- QUIET I2S DEVICE SEARCH ---
+                # Attempts to find a device named 'i2s', 'simple', 'snd_rpi', etc.
+                # Defaults to Index 1 if not found.
                 target_device_index = None
                 for i in range(p.get_device_count()):
                     try:
                         info = p.get_device_info_by_index(i)
-                        if "hw:1,0" in info.get('name', ''):
+                        name = info.get('name', '').lower()
+                        if "i2s" in name or "snd_rpi" in name or "simple" in name:
                             target_device_index = i
                             break
                     except: pass
                 
                 if target_device_index is None:
-                    target_device_index = 1
+                    target_device_index = 1 # Common default for USB/I2S on Pi
 
                 stream = p.open(format=pyaudio.paInt16, 
                                 channels=1, 
@@ -339,11 +342,29 @@ def load_data_collection_audio_page():
                 start_time = time.time()
                 tap_count = 0
                 
-                status_lbl.configure(text="Recording & Tapping...", text_color="#E67E22")
+                # --- GAIN CONFIGURATION ---
+                # 10dB Gain = roughly 3.16x multiplier
+                GAIN_MULTIPLIER = 3.16
+                
+                status_lbl.configure(text=f"Recording (+10dB Boost)...", text_color="#E67E22")
                 
                 while (time.time() - start_time) < RECORD_SECONDS:
-                    data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                    frames.append(data)
+                    raw_data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                    
+                    # --- APPLY SOFTWARE GAIN ---
+                    # 1. Convert to numpy array
+                    audio_data = np.frombuffer(raw_data, dtype=np.int16)
+                    
+                    # 2. Boost Volume
+                    boosted_data = audio_data * GAIN_MULTIPLIER
+                    
+                    # 3. Clip to valid 16-bit range (-32768 to 32767) to avoid distortion
+                    boosted_data = np.clip(boosted_data, -32768, 32767)
+                    
+                    # 4. Convert back to bytes
+                    final_data = boosted_data.astype(np.int16).tobytes()
+                    
+                    frames.append(final_data)
                     
                     elapsed = time.time() - start_time
                     if tap_count < 3:
@@ -357,6 +378,7 @@ def load_data_collection_audio_page():
                 stream.close()
                 p.terminate()
                 
+                # Save processed audio
                 wf = wave.open(str(temp_audio_path), 'wb')
                 wf.setnchannels(1)
                 wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
@@ -367,7 +389,7 @@ def load_data_collection_audio_page():
                 selected_audio_file = str(temp_audio_path)
                 status_lbl.configure(text="Recording Complete", text_color="green")
                 
-                # --- MODIFIED NAVIGATION: GO TO FFT PAGE ---
+                # Proceed to FFT Graph
                 root.after(500, lambda: switch_page("fft_display"))
                 
             except Exception as e:
@@ -383,7 +405,7 @@ def load_data_collection_audio_page():
     return frame
 pages["data_collection_audio"] = load_data_collection_audio_page
 
-# ---- FFT DISPLAY PAGE (NEW) ----
+# ---- FFT DISPLAY PAGE ----
 def load_fft_display_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(1, weight=1)
@@ -409,11 +431,10 @@ def load_fft_display_page():
         signal = np.frombuffer(str_data, dtype=np.int16)
         
         # FFT Calculation
-        # Perform FFT
         fft_spectrum = np.fft.fft(signal)
         frequencies = np.fft.fftfreq(len(signal), d=1/fs)
         
-        # Get positive side of spectrum only
+        # Get positive side of spectrum
         mask = frequencies > 0
         freqs = frequencies[mask]
         mags = np.abs(fft_spectrum)[mask]
@@ -423,18 +444,17 @@ def load_fft_display_page():
         dominant_freq = freqs[peak_idx]
         
         # 3. Create Graph
-        # Create matplotlib figure with specified size (DPI adjusted for screen)
         fig = Figure(figsize=(5, 3), dpi=100)
-        fig.patch.set_facecolor(BG) # Match app background
+        fig.patch.set_facecolor(BG)
         
         ax = fig.add_subplot(111)
-        ax.plot(freqs, mags, color='#2E8B57') # Green line
+        ax.plot(freqs, mags, color='#2E8B57') 
         ax.set_title("Audio Spectrum", fontsize=10)
         ax.set_xlabel("Frequency (Hz)", fontsize=8)
         ax.set_ylabel("Magnitude", fontsize=8)
-        ax.set_xlim(0, 2000) # Limit x-axis to 2000Hz (relevant for tapping)
+        ax.set_xlim(0, 2000) 
         ax.grid(True, linestyle='--', alpha=0.5)
-        ax.set_facecolor('#F7F6F3') # Card color background
+        ax.set_facecolor('#F7F6F3') 
         
         # Embed in Tkinter
         canvas_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -489,7 +509,6 @@ def load_data_collection_page_3():
                 dst_img_path = class_folder / final_img_name
                 shutil.move(processed_path, dst_img_path)
                 if os.path.exists(selected_file): os.remove(selected_file)
-                print(f"[INFO] Image saved.")
 
             if selected_audio_file and os.path.exists(selected_audio_file):
                 final_audio_name = f"{selected_label}_{timestamp}.wav"
