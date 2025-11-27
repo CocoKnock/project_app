@@ -2,6 +2,7 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import Canvas, messagebox
 import cv2
+import joblib
 import numpy as np
 import pandas as pd
 import sys
@@ -12,6 +13,7 @@ import threading
 from joblib import load
 from PIL import Image, ImageTk
 from scipy.stats import skew, kurtosis
+from sklearn.preprocessing import StandardScaler
 
 # Globals
 video_capture = None
@@ -26,10 +28,13 @@ hsv_class = None
 
 USE_PICAMERA2 = False
 
+# Try loading models
 try:
+    scaler = joblib.load("camera_scaler.pkl")
     model = load("camera_model.pkl")
 except Exception as e:
-    print(f"[WARN] Model not loaded: {e}")
+    print(f"[WARN] Model/Scaler not loaded: {e}")
+    scaler = None
     model = None
 
 try:
@@ -66,9 +71,9 @@ BTN_HOVER = "#58D68D"
 TEXT = "#1B5E20"
 CARD = "#F7F6F3"
 
-FONT_TITLE = ("Aerial", 46, "bold")
-FONT_SUB = ("Aerial", 36, "bold")
-FONT_NORMAL = ("Aerial", 18)
+FONT_TITLE = ("Arial", 46, "bold")
+FONT_SUB = ("Arial", 36, "bold")
+FONT_NORMAL = ("Arial", 18)
 
 
 # Window setup
@@ -116,7 +121,7 @@ def make_label(master, text, font=FONT_NORMAL, anchor="center"):
     return lbl
 
 def make_textbox(master, text, font=FONT_NORMAL):
-    tb = ctk.CTkTextbox(master, width=10, height=2, corner_radius=8)
+    tb = ctk.CTkTextbox(master, width=200, height=150, corner_radius=8)
     tb.insert("0.0", text)
     tb.configure(state="disabled")
     return tb
@@ -152,58 +157,100 @@ def stop_camera():
 
 
 # Camera preprocessing and Features
+
+def compute_moments(pixel_array):
+    """
+    Computes the 4 color moments: Mean, Std Dev, Skewness, Kurtosis.
+    Returns 0 for all if the array is empty.
+    """
+    if len(pixel_array) == 0:
+        return 0.0, 0.0, 0.0, 0.0
+    
+    # Handle edge case where all pixels are identical (std = 0)
+    if len(np.unique(pixel_array)) == 1:
+        return float(pixel_array[0]), 0.0, 0.0, 0.0
+
+    m1 = np.mean(pixel_array)
+    m2 = np.std(pixel_array)
+    m3 = skew(pixel_array, bias=False)
+    m4 = kurtosis(pixel_array, bias=False)
+    
+    # Handle NaN results from scipy if sample size is too small
+    m3 = 0.0 if np.isnan(m3) else m3
+    m4 = 0.0 if np.isnan(m4) else m4
+
+    return m1, m2, m3, m4
+
 def camera_features(image_path):
     img = cv2.imread(image_path)
+    if img is None:
+        print(f"[ERROR] Could not read image for features: {image_path}")
+        return [0.0] * 108  # Return 108 zeros if failed
+
+    # 1. Convert to HSV
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # Mean
-    h_mean = np.mean(hsv[:, :, 0])
-    s_mean = np.mean(hsv[:, :, 1])
-    v_mean = np.mean(hsv[:, :, 2])
+    # 2. Binary Mask (Exclude Black Background)
+    lower = np.array([1, 1, 1]) 
+    upper = np.array([255, 255, 255])
+    mask = cv2.inRange(img, lower, upper)
 
-    # Std
-    h_std = np.std(hsv[:, :, 0])
-    s_std = np.std(hsv[:, :, 1])
-    v_std = np.std(hsv[:, :, 2])
+    # 3. Find Bounding Box (ROI) of the object
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return [0.0] * 108 # Image is purely black
 
-    # Skewness
-    h_skew = skew(hsv[:, :, 0].reshape(-1))
-    s_skew = skew(hsv[:, :, 1].reshape(-1))
-    v_skew = skew(hsv[:, :, 2].reshape(-1))
+    # Find largest contour
+    c = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(c)
 
-    # Kurtosis
-    h_kurt = kurtosis(hsv[:, :, 0].reshape(-1))
-    s_kurt = kurtosis(hsv[:, :, 1].reshape(-1))
-    v_kurt = kurtosis(hsv[:, :, 2].reshape(-1))
+    # Crop HSV image and Mask to the bounding box
+    roi_hsv = hsv[y:y+h, x:x+w]
+    roi_mask = mask[y:y+h, x:x+w]
 
-    # GLCM Texture
-    v_uin8 = hsv[:, :, 2].astype(np.uint8)
-    glcm = graycomatrix(v_uin8, distances=[1], angles=[0], levels=256, symmetric=True, normed=True) 
+    # 4. Split into 3x3 Grid
+    step_h = h // 3
+    step_w = w // 3
+    
+    feature_vector = []
 
-    glcm_contrast = graycoprops(glcm, 'contrast')[0, 0]
-    glcm_dissimilarity = graycoprops(glcm, 'dissimilarity')[0, 0]
-    glcm_homogeneity = graycoprops(glcm, 'homogeneity')[0, 0]
-    glcm_energy = graycoprops(glcm, 'energy')[0, 0]
-    glcm_correlation = graycoprops(glcm, 'correlation')[0, 0]
-    glcm_asm = graycoprops(glcm, 'ASM')[0, 0]
+    # Loop through 3 rows and 3 columns
+    for row in range(3):
+        for col in range(3):
+            # Calculate tile coordinates
+            y_start = row * step_h
+            y_end = (row + 1) * step_h if row < 2 else h
+            x_start = col * step_w
+            x_end = (col + 1) * step_w if col < 2 else w
 
+            # Extract Tile
+            tile_hsv = roi_hsv[y_start:y_end, x_start:x_end]
+            tile_mask = roi_mask[y_start:y_end, x_start:x_end]
 
-    return [
-        h_mean, s_mean, v_mean,
-        h_std, s_std, v_std,
-        h_skew, s_skew, v_skew,
-        h_kurt, s_kurt, v_kurt,
-        glcm_contrast, glcm_dissimilarity,
-        glcm_homogeneity, glcm_energy,
-        glcm_correlation, glcm_asm
-    ]
+            # Separate Channels
+            h_c = tile_hsv[:, :, 0]
+            s_c = tile_hsv[:, :, 1]
+            v_c = tile_hsv[:, :, 2]
+
+            # Filter pixels: Only take pixels where mask is NOT black
+            valid_h = h_c[tile_mask > 0]
+            valid_s = s_c[tile_mask > 0]
+            valid_v = v_c[tile_mask > 0]
+
+            # Compute Moments for H, S, V and append
+            feature_vector.extend(compute_moments(valid_h)) 
+            feature_vector.extend(compute_moments(valid_s)) 
+            feature_vector.extend(compute_moments(valid_v)) 
+
+    return feature_vector
 
 
 def camera_prepro(image_path, threaded=False, on_complete=None):
     def process_task():
         global hsv_class
-        processed_file = None
-        hsv_class = None
+        processed_file_local = None
+        hsv_class_local = None
 
         try:
             img = cv2.imread(image_path)
@@ -220,6 +267,9 @@ def camera_prepro(image_path, threaded=False, on_complete=None):
             if num_labels > 1:
                 largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
                 mask = np.uint8(labels == largest_label) * 255
+            else:
+                 # Fallback if no blobs found (creates black image)
+                mask = np.zeros_like(mask)
 
             # ---------- ADD: Hole filling ----------
             mask_filled = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
@@ -236,35 +286,46 @@ def camera_prepro(image_path, threaded=False, on_complete=None):
             # ---------- (KEEP) Final step: Resize ----------
             resized_img = cv2.resize(masked_img, (224, 224))
 
-            processed_file = os.path.splitext(image_path)[0] + "_processed.jpg"
-            cv2.imwrite(processed_file, resized_img)
+            processed_file_local = os.path.splitext(image_path)[0] + "_processed.jpg"
+            cv2.imwrite(processed_file_local, resized_img)
 
             # Extract new complete HSV features
-            features = camera_features(processed_file)
+            features = camera_features(processed_file_local)
 
-            # Classification (unchanged)
-            if model is not None:
+            # Classification (updated for fuzzy output)
+            if model is not None and scaler is not None:
                 try:
                     x = np.array([features])
-                    probs = model.predict_proba(x)[0]
-                    class_labels = model.classes_
-                    hsv_class = {class_labels[i]: float(probs[i]) for i in range(len(class_labels))}
+                    # scale before prediction
+                    x_scaled = scaler.transform(x)
+                    # fuzzy prob output
+                    probs = model.predict_proba(x_scaled)[0]
+                    # fixed class mapping (your label meaning)
+                    class_map = {
+                        0: "malauhog",
+                        1: "malakanin",
+                        2: "malakatad"
+                    }
+                    hsv_class_local = {
+                        class_map[i]: float(probs[i])
+                        for i in range(len(probs))
+                    }
                 except Exception as e:
                     print("[ERROR] Model prediction failed:", e)
-                    hsv_class = None
+                    hsv_class_local = None
             else:
-                print("[INFO] No model — only preprocessing done.")
-                hsv_class = None
+                print("[WARN] Model or Scaler missing, skipping prediction.")
+                hsv_class_local = None
 
         except Exception as e:
             print(f"[ERROR] Preprocessing/classification failed: {e}")
-            processed_file, hsv_class = None, None
+            processed_file_local, hsv_class_local = None, None
 
         # Handle completion
         if threaded and callable(on_complete):
-            root.after(0, lambda: on_complete(processed_file, hsv_class))
+            root.after(0, lambda: on_complete(processed_file_local, hsv_class_local))
         elif not threaded:
-            return processed_file, hsv_class
+            return processed_file_local, hsv_class_local
 
     # Threaded or synchronous execution
     if threaded:
@@ -276,18 +337,20 @@ def camera_prepro(image_path, threaded=False, on_complete=None):
 
 
 def save_features_to_csv(features, filepath, label):
+    # Dynamic Column Generation for 3x3 Grid 
+    # (9 tiles * 3 channels * 4 moments = 108 columns)
+    cols = ["Label"]
+    channels = ['H', 'S', 'V']
+    moments = ['Mean', 'Std', 'Skew', 'Kurt']
+    
+    for i in range(1, 10): # Tiles 1 to 9
+        for c in channels:
+            for m in moments:
+                cols.append(f"T{i}_{c}_{m}")
+
     df = pd.DataFrame(
         [[label] + features],
-        columns=[
-            "Label",
-            "H_mean", "S_mean", "V_mean",
-            "H_std", "S_std", "V_std",
-            "H_skew", "S_skew", "V_skew",
-            "H_kurt", "S_kurt", "V_kurt",
-            "GLCM_contrast", "GLCM_dissimilarity",
-            "GLCM_homogeneity", "GLCM_energy",
-            "GLCM_correlation", "GLCM_ASM"
-        ]
+        columns=cols
     )
     df.to_csv(filepath, mode="a", header=not Path(filepath).exists(), index=False)
 
@@ -816,10 +879,10 @@ def load_data_detection_page_3():
         global hsv_class
         hsv_class = result
         if result is not None:
-            switch_page("data_detection4")
+            switch_page("data_detection5") # DIRECT TO SUMMARY
         else:
             messagebox.showerror("Detection Failed", "Could not process or classify the image.")
-            switch_page("data_detection1")  # or wherever you want to return
+            switch_page("data_detection1")
 
     # Start threaded preprocessing and classification
     if selected_file:
@@ -832,10 +895,7 @@ def load_data_detection_page_3():
 
 pages["data_detection3"] = load_data_detection_page_3
 
-
-pages["data_detection3"] = load_data_detection_page_3
-
-# ---- Data Detection Page 4 (Audio capture placeholder) ----
+# ---- Data Detection Page 4 (Audio placeholder - skipping for now in logic, but keeping) ----
 def load_data_detection_page_4():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(0, weight=2)
