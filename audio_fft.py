@@ -340,7 +340,7 @@ def load_data_collection_audio_page():
                 tap_count = 0
                 
                 # --- GAIN CONFIGURATION (20dB) ---
-                GAIN_MULTIPLIER = 10.0
+                GAIN_MULTIPLIER = 3
                 
                 status_lbl.configure(text=f"Recording (+20dB Boost)...", text_color="#E67E22")
                 
