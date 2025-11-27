@@ -541,7 +541,7 @@ def load_data_detection_page_3():
     return frame
 pages["data_detection3"] = load_data_detection_page_3
 
-# ---- PAGE 4.5: AUDIO RECORDING & ANALYSIS ----
+# ---- PAGE 4.5: AUDIO RECORDING & ANALYSIS (FIXED) ----
 def load_data_detection_audio_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(0, weight=1)
@@ -610,29 +610,26 @@ def load_data_detection_audio_page():
                     if any(k in name for k in ["i2s", "snd_rpi", "simple"]):
                         idx = i; break
                 
-                stream = p.open(format=pyaudio.paInt16, channels=1, rate=SAMPLE_RATE, input=True, input_device_index=idx, frames_per_buffer=CHUNK_SIZE)
+                # Open Stream
+                stream = p.open(format=pyaudio.paInt16, 
+                                channels=1, 
+                                rate=SAMPLE_RATE, 
+                                input=True, 
+                                input_device_index=idx, 
+                                frames_per_buffer=CHUNK_SIZE)
                 
-                frames = []
+                raw_frames = [] # Store RAW bytes here
                 start_time = time.time()
                 tap_count = 0
                 
-                # --- 5dB GAIN CONFIGURATION ---
-                GAIN_DB = 5.0
-                gain_factor = 10 ** (GAIN_DB / 20.0)
+                status_lbl.configure(text="Recording...", text_color="#E67E22")
                 
-                status_lbl.configure(text="Recording (5dB Boost)...", text_color="#E67E22")
-                
+                # 1. RECORD LOOP (Capture Raw Data Only)
                 while (time.time() - start_time) < RECORD_SECONDS:
                     raw = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                    raw_frames.append(raw)
                     
-                    # Apply Gain & DC Offset Fix
-                    data_np = np.frombuffer(raw, dtype=np.int16)
-                    data_np = data_np - np.mean(data_np) # DC Offset
-                    data_np = data_np * gain_factor      # 5dB Gain
-                    data_np = np.clip(data_np, -32768, 32767)
-                    
-                    frames.append(data_np.astype(np.int16).tobytes())
-                    
+                    # Solenoid Logic
                     elapsed = time.time() - start_time
                     if tap_count < 3:
                         if (elapsed > 0.5 and tap_count==0) or (elapsed > 1.5 and tap_count==1) or (elapsed > 2.5 and tap_count==2):
@@ -640,9 +637,31 @@ def load_data_detection_audio_page():
 
                 stream.stop_stream(); stream.close(); p.terminate()
                 
+                # 2. POST-PROCESSING (Apply Gain & DC Fix to the WHOLE file at once)
+                # Combine all chunks into one big buffer
+                full_raw_data = b''.join(raw_frames)
+                audio_data = np.frombuffer(full_raw_data, dtype=np.int16).astype(np.float32)
+                
+                # A. Remove DC Offset (Global Mean)
+                audio_data = audio_data - np.mean(audio_data)
+                
+                # B. Apply 5dB Gain
+                # 5dB = 10^(5/20) ~= 1.778
+                GAIN_DB = 5.0
+                gain_factor = 10 ** (GAIN_DB / 20.0)
+                audio_data = audio_data * gain_factor
+                
+                # C. Clip to prevent distortion
+                audio_data = np.clip(audio_data, -32768, 32767)
+                
+                # D. Convert back to int16 for saving
+                final_bytes = audio_data.astype(np.int16).tobytes()
+                
+                # 3. SAVE FILE
                 wf = wave.open(str(temp_audio_path), 'wb')
                 wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SAMPLE_RATE)
-                wf.writeframes(b''.join(frames)); wf.close()
+                wf.writeframes(final_bytes)
+                wf.close()
                 
                 status_lbl.configure(text="Analyzing...", text_color="blue")
                 root.after(100, lambda: process_audio_result(str(temp_audio_path)))
