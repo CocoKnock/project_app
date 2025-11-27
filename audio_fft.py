@@ -47,7 +47,7 @@ except (ImportError, RuntimeError):
 
 # --- CONFIGURATION ---
 SOLENOID_PIN = 17
-SAMPLE_RATE = 48000  # 48kHz is standard for I2S Mics (INMP441, etc.)
+SAMPLE_RATE = 48000  
 CHUNK_SIZE = 4096    
 RECORD_SECONDS = 3
 
@@ -285,7 +285,7 @@ def load_data_collection_page_2():
     return frame
 pages["data_collection2"] = load_data_collection_page_2
 
-# ---- DATA COLLECTION (AUDIO) - 20dB GAIN VERSION ----
+# ---- DATA COLLECTION (AUDIO) - DC OFFSET FIX & GAIN ----
 def load_data_collection_audio_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(0, weight=1)
@@ -315,7 +315,6 @@ def load_data_collection_audio_page():
                 
                 p = pyaudio.PyAudio()
                 
-                # --- QUIET I2S DEVICE SEARCH ---
                 target_device_index = None
                 for i in range(p.get_device_count()):
                     try:
@@ -327,7 +326,7 @@ def load_data_collection_audio_page():
                     except: pass
                 
                 if target_device_index is None:
-                    target_device_index = 1 # Common default for USB/I2S on Pi
+                    target_device_index = 1 
 
                 stream = p.open(format=pyaudio.paInt16, 
                                 channels=1, 
@@ -341,7 +340,6 @@ def load_data_collection_audio_page():
                 tap_count = 0
                 
                 # --- GAIN CONFIGURATION (20dB) ---
-                # 20dB Gain = 10.0x multiplier
                 GAIN_MULTIPLIER = 10.0
                 
                 status_lbl.configure(text=f"Recording (+20dB Boost)...", text_color="#E67E22")
@@ -349,17 +347,20 @@ def load_data_collection_audio_page():
                 while (time.time() - start_time) < RECORD_SECONDS:
                     raw_data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
                     
-                    # --- APPLY SOFTWARE GAIN ---
                     # 1. Convert to numpy array
                     audio_data = np.frombuffer(raw_data, dtype=np.int16)
-                    
-                    # 2. Boost Volume
+
+                    # 2. REMOVE DC OFFSET (Fix for low freq spike)
+                    # We subtract the mean so the silence centers at 0
+                    audio_data = audio_data - np.mean(audio_data)
+
+                    # 3. Apply Boost
                     boosted_data = audio_data * GAIN_MULTIPLIER
                     
-                    # 3. Clip to valid 16-bit range (-32768 to 32767) to avoid distortion
+                    # 4. Clip to valid 16-bit range
                     boosted_data = np.clip(boosted_data, -32768, 32767)
                     
-                    # 4. Convert back to bytes
+                    # 5. Convert back to bytes
                     final_data = boosted_data.astype(np.int16).tobytes()
                     
                     frames.append(final_data)
@@ -376,7 +377,6 @@ def load_data_collection_audio_page():
                 stream.close()
                 p.terminate()
                 
-                # Save processed audio
                 wf = wave.open(str(temp_audio_path), 'wb')
                 wf.setnchannels(1)
                 wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
@@ -387,7 +387,6 @@ def load_data_collection_audio_page():
                 selected_audio_file = str(temp_audio_path)
                 status_lbl.configure(text="Recording Complete", text_color="green")
                 
-                # Proceed to FFT Graph
                 root.after(500, lambda: switch_page("fft_display"))
                 
             except Exception as e:
@@ -403,58 +402,66 @@ def load_data_collection_audio_page():
     return frame
 pages["data_collection_audio"] = load_data_collection_audio_page
 
-# ---- FFT DISPLAY PAGE ----
+# ---- FFT DISPLAY PAGE (With DC Offset Fix) ----
 def load_fft_display_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(1, weight=1)
     frame.grid_columnconfigure(0, weight=1)
     
-    # 1. Header
     header_frame = ctk.CTkFrame(frame, fg_color="transparent")
     header_frame.grid(row=0, column=0, pady=10, sticky="ew")
     make_label(header_frame, "Frequency Analysis", font=FONT_SUB).pack()
 
-    # 2. Logic to Compute FFT
     dominant_freq = 0
     
     try:
-        # Load WAV file
         wf = wave.open(selected_audio_file, 'rb')
         fs = wf.getframerate()
         nframes = wf.getnframes()
         str_data = wf.readframes(nframes)
         wf.close()
         
-        # Convert to numpy array
         signal = np.frombuffer(str_data, dtype=np.int16)
         
-        # FFT Calculation
+        # --- CRITICAL FIX: Remove DC Offset again before FFT ---
+        signal = signal - np.mean(signal)
+        
         fft_spectrum = np.fft.fft(signal)
         frequencies = np.fft.fftfreq(len(signal), d=1/fs)
         
-        # Get positive side of spectrum
+        # Get positive side
         mask = frequencies > 0
         freqs = frequencies[mask]
         mags = np.abs(fft_spectrum)[mask]
         
-        # Find Dominant Frequency (Peak)
-        peak_idx = np.argmax(mags)
-        dominant_freq = freqs[peak_idx]
+        # --- CRITICAL FIX: Ignore frequencies < 50Hz (Hum/Rumble) ---
+        # Look for peak only in the valid range (50Hz to 2000Hz)
+        valid_range = (freqs > 50) & (freqs < 2500)
         
-        # 3. Create Graph
+        if np.any(valid_range):
+            target_freqs = freqs[valid_range]
+            target_mags = mags[valid_range]
+            peak_idx = np.argmax(target_mags)
+            dominant_freq = target_freqs[peak_idx]
+        else:
+            dominant_freq = 0
+
+        # Graph
         fig = Figure(figsize=(5, 3), dpi=100)
         fig.patch.set_facecolor(BG)
         
         ax = fig.add_subplot(111)
         ax.plot(freqs, mags, color='#2E8B57') 
-        ax.set_title("Audio Spectrum", fontsize=10)
+        ax.set_title("Audio Spectrum (>50Hz)", fontsize=10)
         ax.set_xlabel("Frequency (Hz)", fontsize=8)
         ax.set_ylabel("Magnitude", fontsize=8)
-        ax.set_xlim(0, 2000) 
+        
+        # Zoom in on relevant area
+        ax.set_xlim(50, 2000) 
+        
         ax.grid(True, linestyle='--', alpha=0.5)
         ax.set_facecolor('#F7F6F3') 
         
-        # Embed in Tkinter
         canvas_frame = ctk.CTkFrame(frame, fg_color="transparent")
         canvas_frame.grid(row=1, column=0, sticky="nsew", padx=20)
         
@@ -466,13 +473,11 @@ def load_fft_display_page():
         print(f"FFT Error: {e}")
         make_label(frame, f"Error calculating FFT: {e}", font=FONT_NORMAL).grid(row=1)
 
-    # 4. Display Results
     result_frame = ctk.CTkFrame(frame, fg_color="transparent")
     result_frame.grid(row=2, column=0, pady=20)
     
     make_label(result_frame, f"Dominant Frequency: {dominant_freq:.2f} Hz", font=("Arial", 24, "bold"), anchor="center").pack()
 
-    # 5. Buttons
     btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
     btn_frame.grid(row=3, column=0, pady=20)
     
