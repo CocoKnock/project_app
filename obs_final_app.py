@@ -14,8 +14,6 @@ from joblib import load
 from PIL import Image, ImageTk
 from scipy.stats import skew, kurtosis
 from sklearn.preprocessing import StandardScaler
-
-# --- AUDIO IMPORTS ---
 import pyaudio
 import wave
 import librosa
@@ -47,10 +45,8 @@ SOLENOID_PIN = 17
 SAMPLE_RATE = 48000
 CHUNK_SIZE = 4096
 RECORD_SECONDS = 3
-
-# UPDATED FOR NEW TRAINING (Delta Features)
-N_MFCC = 20   # Changed from 40 to 20
-F_MIN = 50    # Low-cut filter
+N_MFCC = 40
+F_MIN = 50  # Low-cut filter for audio features
 
 # --- HARDWARE SETUP (MOCK & REAL) ---
 try:
@@ -89,10 +85,13 @@ class CoconutFuzzySystem:
     def trapmf(self, x, a, b, c, d):
         """Trapezoidal Membership Function"""
         y = np.zeros_like(x, dtype=float)
+        # Up slope
         mask1 = (x > a) & (x < b)
         y[mask1] = (x[mask1] - a) / (b - a)
+        # Top
         mask2 = (x >= b) & (x <= c)
         y[mask2] = 1.0
+        # Down slope
         mask3 = (x > c) & (x < d)
         y[mask3] = (d - x[mask3]) / (d - c)
         return y
@@ -100,14 +99,17 @@ class CoconutFuzzySystem:
     def trimf(self, x, a, b, c):
         """Triangular Membership Function"""
         y = np.zeros_like(x, dtype=float)
+        # Up slope
         mask1 = (x > a) & (x < b)
         y[mask1] = (x[mask1] - a) / (b - a)
+        # Down slope
         mask2 = (x >= b) & (x < c)
         y[mask2] = (c - x[mask2]) / (c - b)
         return y
 
     def compute(self, img_score, aud_score):
         # 1. FUZZIFY INPUTS
+        # Scalar to array for vectorized functions
         xi = np.array([img_score])
         xa = np.array([aud_score])
 
@@ -121,27 +123,49 @@ class CoconutFuzzySystem:
         aud_kan = self.trimf(xa, 30, 50, 70)[0]
         aud_tad = self.trapmf(xa, 50, 70, 100, 150)[0]
 
-        # 2. EVALUATE RULES
+        # 2. EVALUATE RULES (Min Operator + Weight Scaling)
+        # Output MFs Definitions (for aggregation)
         out_mf_hog = self.trapmf(self.x, -50, 0, 30, 50)
         out_mf_kan = self.trimf(self.x, 30, 50, 70)
         out_mf_tad = self.trapmf(self.x, 50, 70, 100, 150)
 
-        # Rule evaluation (Min operator + Weights)
+        # Rule 1: If Img=Hog & Aud=Hog -> Out=Hog (Wt 1.0)
         r1 = min(img_hog, aud_hog) * 1.0
+        
+        # Rule 2: If Img=Kan & Aud=Hog -> Out=Hog (Wt 0.5)
         r2 = min(img_kan, aud_hog) * 0.5
+        
+        # Rule 3: If Img=Tad & Aud=Hog -> Out=Hog (Wt 0.5)
         r3 = min(img_tad, aud_hog) * 0.5
+
+        # Rule 4: If Img=Hog & Aud=Kan -> Out=Kan (Wt 0.3)
         r4 = min(img_hog, aud_kan) * 0.3
+
+        # Rule 5: If Img=Kan & Aud=Kan -> Out=Kan (Wt 1.0)
         r5 = min(img_kan, aud_kan) * 1.0
+
+        # Rule 6: If Img=Tad & Aud=Kan -> Out=Kan (Wt 0.3)
         r6 = min(img_tad, aud_kan) * 0.3
+
+        # Rule 7: If Img=Hog & Aud=Tad -> Out=Tad (Wt 0.5)
         r7 = min(img_hog, aud_tad) * 0.5
+
+        # Rule 8: If Img=Kan & Aud=Tad -> Out=Tad (Wt 0.5)
         r8 = min(img_kan, aud_tad) * 0.5
+
+        # Rule 9: If Img=Tad & Aud=Tad -> Out=Tad (Wt 1.0)
         r9 = min(img_tad, aud_tad) * 1.0
 
         # 3. AGGREGATION (Max Operator)
+        # Combine rule strengths with output shapes
+        # For Malauhog Output
         active_hog = np.fmin(max(r1, r2, r3), out_mf_hog)
+        # For Malakanin Output
         active_kan = np.fmin(max(r4, r5, r6), out_mf_kan)
+        # For Malakatad Output
         active_tad = np.fmin(max(r7, r8, r9), out_mf_tad)
 
+        # Combine all outputs
         aggregated = np.fmax(active_hog, np.fmax(active_kan, active_tad))
 
         # 4. DEFUZZIFICATION (Centroid)
@@ -149,7 +173,7 @@ class CoconutFuzzySystem:
         denominator = np.sum(aggregated)
 
         if denominator == 0:
-            return 0.0 
+            return 0.0 # Avoid div by zero
         
         centroid = numerator / denominator
         return centroid
@@ -158,6 +182,7 @@ class CoconutFuzzySystem:
 # ---------------------------------------------------------
 # MODEL LOADING
 # ---------------------------------------------------------
+# 1. LOAD CAMERA MODELS
 try:
     cam_scaler = joblib.load("camera_scaler.pkl")
     cam_model = load("camera_model.pkl")
@@ -167,8 +192,8 @@ except Exception as e:
     cam_scaler = None
     cam_model = None
 
+# 2. LOAD AUDIO MODELS
 try:
-    # Ensure these are the NEW files from train_model_delta.py
     audio_model = joblib.load("svm_audio_model.pkl")
     audio_scaler = joblib.load("scaler.pkl") 
     audio_encoder = joblib.load("encoder.pkl")
@@ -261,11 +286,18 @@ def stop_camera():
         except: pass
         picam = None
 
+# --- SCORE CALCULATION ---
 def calculate_maturity_score(probs_dict):
+    """
+    Calculates 0-100 score based on probabilities.
+    Malauhog=0, Malakanin=50, Malakatad=100.
+    """
     if not probs_dict: return 0.0
     p_hog = probs_dict.get('malauhog', 0.0)
     p_kan = probs_dict.get('malakanin', 0.0)
     p_tad = probs_dict.get('malakatad', 0.0)
+    
+    # Weighted calculation
     score = (p_hog * 0) + (p_kan * 50) + (p_tad * 100)
     return score
 
@@ -305,34 +337,12 @@ def camera_features(image_path):
                 feature_vector.extend(compute_moments(tile_hsv[:,:,i][tile_mask>0]))
     return feature_vector
 
-# --- UPDATED AUDIO FEATURE EXTRACTION (DELTA + FLATNESS) ---
+# --- AUDIO FEATURE EXTRACTION ---
 def extract_audio_features(file_path):
     try:
-        y, sr = librosa.load(file_path)
-        
-        # 1. Normalize Volume (Crucial for Bias)
-        y = librosa.util.normalize(y)
-        
-        # 2. Trim Silence
-        y, _ = librosa.effects.trim(y, top_db=30)
-
-        # 3. Basic MFCC (20)
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC, fmin=F_MIN)
-        mfcc_mean = np.mean(mfcc.T, axis=0)
-
-        # 4. Delta MFCC (Decay/Ringing)
-        delta_mfcc = librosa.feature.delta(mfcc)
-        delta_mean = np.mean(delta_mfcc.T, axis=0)
-
-        # 5. Spectral Centroid
-        cent = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
-
-        # 6. Spectral Flatness
-        flatness = np.mean(librosa.feature.spectral_flatness(y=y))
-
-        # Combine into one vector (42 features total)
-        return np.hstack([mfcc_mean, delta_mean, cent, flatness])
-        
+        audio, sr = librosa.load(file_path)
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=N_MFCC, fmin=F_MIN)
+        return np.mean(mfccs.T, axis=0)
     except Exception as e:
         print(f"Audio Feat Error: {e}")
         return None
@@ -445,7 +455,7 @@ def load_data_detection_page_1():
         def loop_pi():
             global camera_after
             try:
-                frame_arr = cv2.rotate(picam.capture_array(), cv2.ROTATE_180)
+                frame_arr = cv2.rotate(picam.capture_array())
                 update_frame(frame_arr)
                 camera_after = root.after(30, loop_pi)
             except: stop_camera()
@@ -491,25 +501,62 @@ pages["data_detection1"] = load_data_detection_page_1
 
 # ---- PAGE 3: IMAGE PREVIEW ----
 def load_data_detection_page_2():
-    frame = ctk.CTkFrame(main_container, fg_color=BG)
-    frame.grid_rowconfigure(1, weight=1)
-    frame.grid_columnconfigure(0, weight=1)
-    make_label(frame, "Captured Image", font=FONT_SUB).grid(row=0, column=0, pady=6)
-    if selected_file:
-        img = Image.open(selected_file)
-        img.thumbnail((500, 300))
-        imgtk = ImageTk.PhotoImage(img)
-        lbl = ctk.CTkLabel(frame, image=imgtk, text="")
-        lbl.image = imgtk
-        lbl.grid(row=1, column=0)
+    global selected_file
     
+    frame = ctk.CTkFrame(main_container, fg_color=BG)
+    frame.grid(row=0, column=0, sticky="nsew")
+    frame.grid_rowconfigure(0, weight=1)    # Title
+    frame.grid_rowconfigure(1, weight=5)    # Image
+    frame.grid_rowconfigure(2, weight=1)    # Buttons
+    frame.grid_columnconfigure(0, weight=1)
+
+    make_label(frame, "Captured Image", font=FONT_SUB).grid(row=0, column=0, pady=10)
+
+    # --- CANVAS LOGIC (Like Original App) ---
+    if selected_file and os.path.exists(selected_file):
+        try:
+            # Card Container
+            canvas_card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=12)
+            canvas_card.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+            
+            # TK Canvas
+            tk_canvas = Canvas(canvas_card, bg="#5A56C8", highlightthickness=0)
+            tk_canvas.pack(fill="both", expand=True, padx=10, pady=10)
+
+            def update_preview():
+                try:
+                    # Resize logic
+                    w = tk_canvas.winfo_width()
+                    h = tk_canvas.winfo_height()
+                    if w < 10: w = 500
+                    if h < 10: h = 300
+                    
+                    img = Image.open(selected_file)
+                    img = img.resize((w, h), Image.LANCZOS)
+                    imgtk = ImageTk.PhotoImage(image=img)
+                    
+                    tk_canvas.create_image(0, 0, image=imgtk, anchor="nw")
+                    tk_canvas.image = imgtk # Keep ref
+                except Exception:
+                    pass
+            
+            # Trigger update after layout
+            tk_canvas.after(100, update_preview)
+
+        except Exception as e:
+            make_label(frame, f"Error: {e}").grid(row=1, column=0)
+    else:
+        make_label(frame, "No image found").grid(row=1, column=0)
+    
+    # Buttons
     btns = ctk.CTkFrame(frame, fg_color=BG)
     btns.grid(row=2, column=0, pady=20)
-    make_button(btns, "Retake", lambda: switch_page("data_detection1")).pack(side="left", padx=10)
-    make_button(btns, "Next: Process", lambda: switch_page("data_detection3")).pack(side="left", padx=10)
-    return frame
-pages["data_detection2"] = load_data_detection_page_2
+    make_button(btns, "Retake", lambda: switch_page("data_detection1"), width=150).pack(side="left", padx=10)
+    make_button(btns, "Next: Process", lambda: switch_page("data_detection3"), width=150).pack(side="left", padx=10)
 
+    return frame
+
+pages["data_detection2"] = load_data_detection_page_2
 # ---- PAGE 4: IMAGE PROCESSING ----
 def load_data_detection_page_3():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
@@ -529,7 +576,7 @@ def load_data_detection_page_3():
     return frame
 pages["data_detection3"] = load_data_detection_page_3
 
-# ---- PAGE 4.5: AUDIO RECORDING & ANALYSIS (With Clean Audio Logic) ----
+# ---- PAGE 4.5: AUDIO RECORDING & ANALYSIS (FIXED) ----
 def load_data_detection_audio_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(0, weight=1)
@@ -549,7 +596,7 @@ def load_data_detection_audio_page():
     def process_audio_result(audio_path):
         global processing_results
         
-        # 1. Extract (Using new Delta/Flatness logic)
+        # 1. Extract
         features = extract_audio_features(audio_path)
         
         # 2. Predict
@@ -598,23 +645,26 @@ def load_data_detection_audio_page():
                     if any(k in name for k in ["i2s", "snd_rpi", "simple"]):
                         idx = i; break
                 
-                stream = p.open(format=pyaudio.paInt16, channels=1, rate=SAMPLE_RATE, input=True, input_device_index=idx, frames_per_buffer=CHUNK_SIZE)
+                # Open Stream
+                stream = p.open(format=pyaudio.paInt16, 
+                                channels=1, 
+                                rate=SAMPLE_RATE, 
+                                input=True, 
+                                input_device_index=idx, 
+                                frames_per_buffer=CHUNK_SIZE)
                 
-                raw_frames = []
+                raw_frames = [] # Store RAW bytes here
                 start_time = time.time()
                 tap_count = 0
                 
-                # 5dB Gain
-                GAIN_DB = 5.0
-                gain_factor = 10 ** (GAIN_DB / 20.0)
+                status_lbl.configure(text="Recording...", text_color="#E67E22")
                 
-                status_lbl.configure(text="Recording (5dB Boost)...", text_color="#E67E22")
-                
-                # RECORD RAW FIRST (To avoid DC Offset chopping)
+                # 1. RECORD LOOP (Capture Raw Data Only)
                 while (time.time() - start_time) < RECORD_SECONDS:
                     raw = stream.read(CHUNK_SIZE, exception_on_overflow=False)
                     raw_frames.append(raw)
                     
+                    # Solenoid Logic
                     elapsed = time.time() - start_time
                     if tap_count < 3:
                         if (elapsed > 0.5 and tap_count==0) or (elapsed > 1.5 and tap_count==1) or (elapsed > 2.5 and tap_count==2):
@@ -622,23 +672,31 @@ def load_data_detection_audio_page():
 
                 stream.stop_stream(); stream.close(); p.terminate()
                 
-                # PROCESS RAW DATA (One chunk)
-                full_bytes = b''.join(raw_frames)
-                data_np = np.frombuffer(full_bytes, dtype=np.int16).astype(np.float32)
+                # 2. POST-PROCESSING (Apply Gain & DC Fix to the WHOLE file at once)
+                # Combine all chunks into one big buffer
+                full_raw_data = b''.join(raw_frames)
+                audio_data = np.frombuffer(full_raw_data, dtype=np.int16).astype(np.float32)
                 
-                # 1. Remove DC Offset (Global)
-                data_np = data_np - np.mean(data_np)
+                # A. Remove DC Offset (Global Mean)
+                audio_data = audio_data - np.mean(audio_data)
                 
-                # 2. Apply Gain
-                data_np = data_np * gain_factor
+                # B. Apply 5dB Gain
+                # 5dB = 10^(5/20) ~= 1.778
+                GAIN_DB = 5.0
+                gain_factor = 10 ** (GAIN_DB / 20.0)
+                audio_data = audio_data * gain_factor
                 
-                # 3. Clip
-                data_np = np.clip(data_np, -32768, 32767)
+                # C. Clip to prevent distortion
+                audio_data = np.clip(audio_data, -32768, 32767)
                 
-                # Save
+                # D. Convert back to int16 for saving
+                final_bytes = audio_data.astype(np.int16).tobytes()
+                
+                # 3. SAVE FILE
                 wf = wave.open(str(temp_audio_path), 'wb')
                 wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SAMPLE_RATE)
-                wf.writeframes(data_np.astype(np.int16).tobytes()); wf.close()
+                wf.writeframes(final_bytes)
+                wf.close()
                 
                 status_lbl.configure(text="Analyzing...", text_color="blue")
                 root.after(100, lambda: process_audio_result(str(temp_audio_path)))
