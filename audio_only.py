@@ -255,14 +255,10 @@ pages["main"] = load_main_page
 # ---- DATA COLLECTION 1 (Camera) ----
 # NOTE: This is skipped in the flow as per request, but kept in code if needed later.
 def load_data_collection_page_1():
-    # ... (Code omitted for brevity as it is skipped, but logic exists in previous version)
-    # Since we are skipping this, we just redirect back or show error if accessed manually
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     make_label(frame, "Camera Skipped").pack()
     make_button(frame, "Back", lambda: switch_page("main")).pack()
     return frame
-
-# pages["data_collection1"] = load_data_collection_page_1 # COMMENTED OUT TO DISABLE ROUTING
 
 # ---- DATA COLLECTION 2 (Label Selection) ----
 def load_data_collection_page_2():
@@ -316,7 +312,32 @@ def load_data_collection_audio_page():
                 temp_audio_path = folder_path1 / temp_audio_name
                 
                 p = pyaudio.PyAudio()
-                stream = p.open(format=pyaudio.paInt16, channels=1, rate=SAMPLE_RATE, input=True, frames_per_buffer=CHUNK_SIZE)
+                
+                # --- AUDIO DEVICE SELECTION (Attempt to find hw:1,0) ---
+                target_device_index = None
+                
+                # Search for device with "hw:1,0" in name
+                for i in range(p.get_device_count()):
+                    try:
+                        info = p.get_device_info_by_index(i)
+                        # Check name for typical ALSA strings like (hw:1,0)
+                        if "hw:1,0" in info.get('name', ''):
+                            target_device_index = i
+                            print(f"[INFO] Found target hardware: {info['name']} at Index {i}")
+                            break
+                    except: pass
+                
+                # Fallback to Index 1 (Standard for external USB Audio on Pi) if specific string not found
+                if target_device_index is None:
+                    print("[WARN] Specific 'hw:1,0' name not found. Defaulting to Index 1.")
+                    target_device_index = 1
+
+                stream = p.open(format=pyaudio.paInt16, 
+                                channels=1, 
+                                rate=SAMPLE_RATE, 
+                                input=True,
+                                input_device_index=target_device_index,  # <--- SET DEVICE HERE
+                                frames_per_buffer=CHUNK_SIZE)
                 
                 frames = []
                 start_time = time.time()
