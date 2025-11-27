@@ -42,8 +42,8 @@ except (ImportError, RuntimeError):
 
 # --- CONFIGURATION ---
 SOLENOID_PIN = 17
-SAMPLE_RATE = 44100
-CHUNK_SIZE = 1024
+SAMPLE_RATE = 48000  # <--- Change this from 44100 to 48000
+CHUNK_SIZE = 4096    # Increase chunk size slightly to prevent overflows
 RECORD_SECONDS = 3
 
 # Globals
