@@ -356,7 +356,7 @@ def load_data_detection_page_1():
         def loop_pi():
             global camera_after
             try:
-                frame_arr = cv2.rotate(picam.capture_array(), cv2.ROTATE_180)
+                frame_arr = cv2.rotate(picam.capture_array())
                 update_frame(frame_arr)
                 camera_after = root.after(30, loop_pi)
             except: stop_camera()
@@ -402,23 +402,61 @@ pages["data_detection1"] = load_data_detection_page_1
 
 # ---- PAGE 3: IMAGE PREVIEW ----
 def load_data_detection_page_2():
-    frame = ctk.CTkFrame(main_container, fg_color=BG)
-    frame.grid_rowconfigure(1, weight=1)
-    frame.grid_columnconfigure(0, weight=1)
-    make_label(frame, "Captured Image", font=FONT_SUB).grid(row=0, column=0, pady=6)
-    if selected_file:
-        img = Image.open(selected_file)
-        img.thumbnail((500, 300))
-        imgtk = ImageTk.PhotoImage(img)
-        lbl = ctk.CTkLabel(frame, image=imgtk, text="")
-        lbl.image = imgtk
-        lbl.grid(row=1, column=0)
+    global selected_file
     
+    frame = ctk.CTkFrame(main_container, fg_color=BG)
+    frame.grid(row=0, column=0, sticky="nsew")
+    frame.grid_rowconfigure(0, weight=1)    # Title
+    frame.grid_rowconfigure(1, weight=5)    # Image
+    frame.grid_rowconfigure(2, weight=1)    # Buttons
+    frame.grid_columnconfigure(0, weight=1)
+
+    make_label(frame, "Captured Image", font=FONT_SUB).grid(row=0, column=0, pady=10)
+
+    # --- CANVAS LOGIC (Like Original App) ---
+    if selected_file and os.path.exists(selected_file):
+        try:
+            # Card Container
+            canvas_card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=12)
+            canvas_card.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+            
+            # TK Canvas
+            tk_canvas = Canvas(canvas_card, bg="#5A56C8", highlightthickness=0)
+            tk_canvas.pack(fill="both", expand=True, padx=10, pady=10)
+
+            def update_preview():
+                try:
+                    # Resize logic
+                    w = tk_canvas.winfo_width()
+                    h = tk_canvas.winfo_height()
+                    if w < 10: w = 500
+                    if h < 10: h = 300
+                    
+                    img = Image.open(selected_file)
+                    img = img.resize((w, h), Image.LANCZOS)
+                    imgtk = ImageTk.PhotoImage(image=img)
+                    
+                    tk_canvas.create_image(0, 0, image=imgtk, anchor="nw")
+                    tk_canvas.image = imgtk # Keep ref
+                except Exception:
+                    pass
+            
+            # Trigger update after layout
+            tk_canvas.after(100, update_preview)
+
+        except Exception as e:
+            make_label(frame, f"Error: {e}").grid(row=1, column=0)
+    else:
+        make_label(frame, "No image found").grid(row=1, column=0)
+    
+    # Buttons
     btns = ctk.CTkFrame(frame, fg_color=BG)
     btns.grid(row=2, column=0, pady=20)
-    make_button(btns, "Retake", lambda: switch_page("data_detection1")).pack(side="left", padx=10)
-    make_button(btns, "Next: Process", lambda: switch_page("data_detection3")).pack(side="left", padx=10)
+    make_button(btns, "Retake", lambda: switch_page("data_detection1"), width=150).pack(side="left", padx=10)
+    make_button(btns, "Next: Process", lambda: switch_page("data_detection3"), width=150).pack(side="left", padx=10)
+
     return frame
+
 pages["data_detection2"] = load_data_detection_page_2
 
 # ---- PAGE 4: IMAGE PROCESSING ----
