@@ -285,7 +285,7 @@ def load_data_collection_page_2():
     return frame
 pages["data_collection2"] = load_data_collection_page_2
 
-# ---- DATA COLLECTION (AUDIO) - 10dB GAIN VERSION ----
+# ---- DATA COLLECTION (AUDIO) - 20dB GAIN VERSION ----
 def load_data_collection_audio_page():
     frame = ctk.CTkFrame(main_container, fg_color=BG)
     frame.grid_rowconfigure(0, weight=1)
@@ -316,8 +316,6 @@ def load_data_collection_audio_page():
                 p = pyaudio.PyAudio()
                 
                 # --- QUIET I2S DEVICE SEARCH ---
-                # Attempts to find a device named 'i2s', 'simple', 'snd_rpi', etc.
-                # Defaults to Index 1 if not found.
                 target_device_index = None
                 for i in range(p.get_device_count()):
                     try:
@@ -342,11 +340,11 @@ def load_data_collection_audio_page():
                 start_time = time.time()
                 tap_count = 0
                 
-                # --- GAIN CONFIGURATION ---
-                # 10dB Gain = roughly 3.16x multiplier
-                GAIN_MULTIPLIER = 3.16
+                # --- GAIN CONFIGURATION (20dB) ---
+                # 20dB Gain = 10.0x multiplier
+                GAIN_MULTIPLIER = 10.0
                 
-                status_lbl.configure(text=f"Recording (+10dB Boost)...", text_color="#E67E22")
+                status_lbl.configure(text=f"Recording (+20dB Boost)...", text_color="#E67E22")
                 
                 while (time.time() - start_time) < RECORD_SECONDS:
                     raw_data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
