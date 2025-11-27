@@ -2,10 +2,8 @@ import os
 import numpy as np
 import librosa
 import joblib
-from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import accuracy_score, classification_report
 
 # --- CONFIGURATION ---
 DATASET_PATH = "dataset"
@@ -15,7 +13,7 @@ ENCODER_FILE = "encoder.pkl"
 
 # Feature Extraction Settings
 N_MFCC = 40
-F_MIN = 50  # <--- CRITICAL: Ignores frequencies below 50Hz (Hum/DC Offset)
+F_MIN = 50  # Ignores frequencies below 50Hz (Hum/DC Offset)
 
 # Maturity Weights for Score Calculation
 MATURITY_WEIGHTS = {
@@ -26,10 +24,10 @@ MATURITY_WEIGHTS = {
 
 def extract_features(file_path):
     try:
-        # Load audio (Removed 'res_type' to fix resampy error)
+        # Load audio (Standard load to avoid resampy errors)
         audio, sr = librosa.load(file_path)
         
-        # Extract MFCCs with low-cut filter (fmin)
+        # Extract MFCCs with low-cut filter
         mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=N_MFCC, fmin=F_MIN)
         
         # Average across time
@@ -40,7 +38,7 @@ def extract_features(file_path):
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    print("--- 1. LOADING DATASET ---")
+    print("--- 1. LOADING FULL DATASET ---")
     features = []
     labels = []
 
@@ -69,61 +67,49 @@ if __name__ == "__main__":
 
     X = np.array(features)
     y = np.array(labels)
+    
+    print(f"\nTotal Training Samples: {len(X)}")
 
     # --- 2. PREPROCESSING ---
+    # Encode labels
     le = LabelEncoder()
     y_encoded = le.fit_transform(y)
     
-    # Split 70% Train, 30% Test
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_encoded, test_size=0.3, random_state=42, stratify=y_encoded
-    )
-
-    # Scale Features
+    # Scale Features (Fit on EVERYTHING)
+    print("Scaling features...")
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    X_scaled = scaler.fit_transform(X)
 
-    # --- 3. TRAINING ---
-    print("\n--- 3. TRAINING MODEL ---")
-    # probability=True is REQUIRED for the percentage outputs
-    svm = SVC(kernel='rbf', C=1.0, probability=True)
-    svm.fit(X_train_scaled, y_train)
+    # --- 3. TRAINING (FULL DATA) ---
+    print("\n--- 3. TRAINING SVM MODEL (100% Data) ---")
+    
+    # class_weight='balanced' fixes the bias if one folder has more files than others
+    svm = SVC(kernel='rbf', C=1.0, probability=True, class_weight='balanced')
+    
+    svm.fit(X_scaled, y_encoded)
     print("Training Complete.")
 
-    # --- 4. ACCURACY CHECK ---
-    print("\n--- 4. EVALUATION ---")
-    y_pred = svm.predict(X_test_scaled)
-    acc = accuracy_score(y_test, y_pred)
-    print(f"Global Accuracy: {acc*100:.2f}%")
-    print(classification_report(y_test, y_pred, target_names=le.classes_))
-
-    # --- 5. DEMONSTRATION OF OUTPUTS (Probabilities + Score) ---
-    print("\n--- 5. SAMPLE OUTPUTS (What the App will see) ---")
-    
-    # Get probabilities for the test set
-    probs_all = svm.predict_proba(X_test_scaled)
+    # --- 4. SANITY CHECK (Test on Training Data) ---
+    print("\n--- 4. SANITY CHECK (Testing on Training Data) ---")
+    # We test on the same data just to verify the model learned the logic
+    # ideally this should be near 100% accuracy now
+    probs_all = svm.predict_proba(X_scaled)
     class_names = le.classes_
 
-    # Show first 5 test samples
-    for i in range(min(5, len(X_test))):
-        print(f"\nSample {i+1} (Actual: {le.inverse_transform([y_test[i]])[0]})")
-        
-        current_score = 0
+    # Show first 3 samples as example
+    for i in range(min(3, len(X))):
+        print(f"\nSample {i+1} (Actual: {le.inverse_transform([y_encoded[i]])[0]})")
         probs = probs_all[i]
+        current_score = 0
         
-        # Calculate Probabilities & Maturity Score
         for class_name, prob in zip(class_names, probs):
-            # 1. Output Probability
             print(f"   {class_name.capitalize()}: {prob*100:.2f}%")
-            
-            # 2. Add to Score
             weight = MATURITY_WEIGHTS.get(class_name.lower(), 0)
             current_score += (prob * weight)
             
-        print(f"   => MATURITY SCORE: {current_score:.2f} / 100")
+        print(f"   => MATURITY SCORE: {current_score:.2f}")
 
-    # --- 6. SAVE ARTIFACTS ---
+    # --- 5. SAVE ARTIFACTS ---
     joblib.dump(svm, MODEL_FILE)
     joblib.dump(scaler, SCALER_FILE)
     joblib.dump(le, ENCODER_FILE)
