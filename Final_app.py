@@ -468,18 +468,22 @@ def load_data_detection_page_1():
         picam = Picamera2()
         picam.configure(picam.create_preview_configuration(main={"size": (640, 480)}))
         picam.start()
+        
         def loop_pi():
             global camera_after
             try:
-                frame_arr = cv2.rotate(picam.capture_array())
+                # --- CHANGED: No Rotation ---
+                frame_arr = picam.capture_array()
                 update_frame(frame_arr)
                 camera_after = root.after(30, loop_pi)
             except: stop_camera()
         loop_pi()
+        
         def capture():
             global selected_file
             try:
-                frame_arr = cv2.rotate(picam.capture_array(), cv2.ROTATE_180)
+                # --- CHANGED: No Rotation ---
+                frame_arr = picam.capture_array()
                 path = folder_path2 / f"detect_img_{time.strftime('%Y%m%d-%H%M%S')}.jpg"
                 cv2.imwrite(str(path), cv2.cvtColor(frame_arr, cv2.COLOR_RGB2BGR))
                 selected_file = str(path)
